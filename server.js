@@ -12,67 +12,94 @@ const wss = new WebSocket.Server({ server });
 
 const clients = new Set();
 
-wss.on('connection', (ws) => {
-    clients.add(ws);
-    console.log(`[Bridge] Client verbunden. Aktive Verbingungen: ${clients.size}`);
+// Zentraler Speicherstand auf dem Render-Server
+let globalState = {
+    leverage: 50,
+    margin: 5000,
+    tp: 0.75,
+    sl: 1.25,
+    transactions: []
+};
 
-    ws.on('message', (message) => {
-        try {
-            broadcast(message, ws);
-        } catch (e) {}
-    });
-
-    ws.on('close', () => clients.delete(ws));
-    ws.on('error', () => clients.delete(ws));
-});
-
-function broadcast(data, excludeWs = null) {
-    clients.forEach((client) => {
-        if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+function broadcast(data, senderWs = null) {
+    clients.forEach(client => {
+        if (client !== senderWs && client.readyState === WebSocket.OPEN) {
             client.send(data);
         }
     });
 }
 
-// Preise & Live State
-let lastBinanceTickTime = 0;
-const prices = { BTCUSDT: 68150, ETHUSDT: 2450, SOLUSDT: 135, XRPUSDT: 0.58, DOGEUSDT: 0.12 };
+wss.on('connection', (ws) => {
+    clients.add(ws);
+    console.log(`[Bridge] Client verbunden. Aktive Verbindungen: ${clients.size}`);
 
-// Binance WebSocket Stream Connection
-const binanceStreams = 'btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade/dogeusdt@aggTrade';
-const binanceWsUrl = `wss://stream.binance.com:9443/stream?streams=${binanceStreams}`;
+    // 1. Sendet sofort den aktuellsten Status an jedes neu verbundene Gerät (z.B. Handy)
+    ws.send(JSON.stringify({
+        type: 'PARAM_UPDATE',
+        data: {
+            leverage: globalState.leverage,
+            margin: globalState.margin,
+            tp: globalState.tp,
+            sl: globalState.sl
+        }
+    }));
+
+    ws.on('message', (message) => {
+        try {
+            const parsed = JSON.parse(message);
+
+            // 2. Aktualisiert den globalen Server-Speicher bei Änderungen
+            if (parsed.type === 'PARAM_UPDATE' && parsed.data) {
+                if (parsed.data.leverage !== undefined) globalState.leverage = parsed.data.leverage;
+                if (parsed.data.margin !== undefined) globalState.margin = parsed.data.margin;
+                if (parsed.data.tp !== undefined) globalState.tp = parsed.data.tp;
+                if (parsed.data.sl !== undefined) globalState.sl = parsed.data.sl;
+            } else if (parsed.type === 'TX_UPDATE' && parsed.tx) {
+                globalState.transactions.push(parsed.tx);
+            }
+
+            // 3. Verteilt das Update sofort an alle anderen verbundenen Bildschirme
+            broadcast(JSON.stringify(parsed), ws);
+        } catch (e) {
+            console.error('[Bridge] Fehler beim Verarbeiten:', e);
+        }
+    });
+
+    ws.on('close', () => {
+        clients.delete(ws);
+        console.log(`[Bridge] Client getrennt. Verbleibend: ${clients.size}`);
+    });
+});
+
+// BINANCE LIVE STREAM & FALLBACK ENGINE
+let lastBinanceTick = Date.now();
+const prices = { BTCEUR: 68150, ETHEUR: 2450, SOLEUR: 135, XRPEUR: 0.58, DOGEEUR: 0.12 };
 
 function connectBinanceStream() {
-    let binanceWs = new WebSocket(binanceWsUrl);
+    const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade/dogeusdt@aggTrade');
 
     binanceWs.on('message', (data) => {
+        lastBinanceTick = Date.now();
         try {
-            const payload = JSON.parse(data);
-            if (payload && payload.data) {
-                lastBinanceTickTime = Date.now();
-                if (payload.data.s && payload.data.p) {
-                    prices[payload.data.s] = parseFloat(payload.data.p);
-                }
-                broadcast(JSON.stringify({ type: 'TICK', data: payload.data }));
-            }
+            const tick = JSON.parse(data);
+            broadcast(JSON.stringify({ type: 'TICK', data: tick }));
         } catch (e) {}
     });
 
-    binanceWs.on('error', () => {});
     binanceWs.on('close', () => setTimeout(connectBinanceStream, 3000));
+    binanceWs.on('error', () => binanceWs.close());
 }
 
 connectBinanceStream();
 
-// HYBRID ENGINE FALLBACK (Garantiert Live-Bewegung bei Binance/Render IP-Sperren)
 setInterval(() => {
-    if (Date.now() - lastBinanceTickTime > 1200 && clients.size > 0) {
-        Object.keys(prices).forEach((symbol) => {
+    if (Date.now() - lastBinanceTick > 1200 && clients.size > 0) {
+        Object.keys(prices).forEach(symbol => {
             const deltaPct = (Math.random() - 0.495) * 0.0006;
             prices[symbol] = prices[symbol] * (1 + deltaPct);
             const tickData = {
                 e: 'aggTrade',
-                s: symbol,
+                s: symbol.replace('EUR', 'USDT'),
                 p: prices[symbol].toFixed(2),
                 q: (Math.random() * 0.3 + 0.01).toFixed(4),
                 m: Math.random() > 0.5
