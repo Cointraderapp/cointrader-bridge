@@ -5,13 +5,14 @@ const WebSocket = require('ws');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine (5-Min Trend Filter Active)'));
+app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine v6.3 Institutional Pro'));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const clients = new Set();
 
+// 1. DREI KLAR DEFINIERTE STRATEGIE-PROFILE
 const PROFILES = {
     SAVE: { id: 'SAVE', name: 'Top5-Save 🛡️', cvdThreshold: 80000, minRangePct: 0.40, leverage: 10, margin: 2000, tp: 0.50, sl: 0.60, timeoutSec: 75, cooldownSec: 30, use5MinTrend: true },
     MEDIUM: { id: 'MEDIUM', name: 'Top5-Medium ⚖️', cvdThreshold: 40000, minRangePct: 0.20, leverage: 20, margin: 2000, tp: 0.60, sl: 0.80, timeoutSec: 90, cooldownSec: 20, use5MinTrend: true },
@@ -49,26 +50,42 @@ function getInitialState() {
 
 let globalState = getInitialState();
 let tradeCooldownUntil = 0;
+let consecutiveLosses = 0; // ANTI-WHIPSAW TRACKER
 
 const prices = { BTCEUR: 72700, ETHEUR: 2290, SOLEUR: 95.4, XRPEUR: 0.58, DOGEEUR: 0.12 };
 const cvdEuro = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
 const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: [] };
+const whaleSpikes = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 }; // WHALE SWEEP TRACKER
+
+// VWAP DATENSPEICHER
+const vwapData = {
+    BTCEUR: { sumVP: 0, sumVol: 0 },
+    ETHEUR: { sumVP: 0, sumVol: 0 },
+    SOLEUR: { sumVP: 0, sumVol: 0 },
+    XRPEUR: { sumVP: 0, sumVol: 0 },
+    DOGEEUR: { sumVP: 0, sumVol: 0 }
+};
+
+// 2. HELFER & FILTER-FUNKTIONEN
+function getVWAP(symbol, price, euroVolume) {
+    const data = vwapData[symbol] || { sumVP: 0, sumVol: 0 };
+    data.sumVP = (data.sumVP * 0.99) + (price * euroVolume);
+    data.sumVol = (data.sumVol * 0.99) + euroVolume;
+    vwapData[symbol] = data;
+    return data.sumVol > 0 ? (data.sumVP / data.sumVol) : price;
+}
 
 function check5MinTrend(symbol, currentPrice, type, profile) {
-    if (!profile.use5MinTrend) return true; // Risk-Modus überspringt den Filter
+    if (!profile.use5MinTrend) return true;
 
     const history = priceHistory[symbol];
-    if (!history || history.length < 30) return true; // Aufwärmphase erlauben
+    if (!history || history.length < 30) return true;
 
-    // Berechne den Durchschnitt der ältesten Ticks im Speicher (5-Min-Fenster)
     const sampleSize = Math.min(20, Math.floor(history.length / 3));
     const oldPriceAvg = history.slice(0, sampleSize).reduce((a, b) => a + b, 0) / sampleSize;
 
-    if (type === 'LONG') {
-        return currentPrice > oldPriceAvg; // LONG nur wenn über 5-Min-Trend
-    } else if (type === 'SHORT') {
-        return currentPrice < oldPriceAvg; // SHORT nur wenn unter 5-Min-Trend
-    }
+    if (type === 'LONG') return currentPrice > oldPriceAvg;
+    if (type === 'SHORT') return currentPrice < oldPriceAvg;
     return true;
 }
 
@@ -80,20 +97,6 @@ function getSessionMultiplier() {
     if (isLondon && isNY) return { name: "LONDON+NY OVERLAP 🔥", multiplier: 0.85 };
     if (isLondon || isNY) return { name: "MAIN SESSION 📈", multiplier: 1.0 };
     return { name: "OFF-HOURS / ASIEN 🌙", multiplier: 1.3 };
-}
-
-function getLunarBias() {
-    const date = new Date();
-    let year = date.getUTCFullYear(), month = date.getUTCMonth() + 1, day = date.getUTCDate();
-    if (month < 3) { year--; month += 12; }
-    let a = Math.floor(year / 100), b = Math.floor(a / 4), c = 2 - a + b;
-    let e = Math.floor(365.25 * (year + 4716)), f = Math.floor(30.6001 * (month + 1));
-    let jd = c + day + e + f - 1524.5;
-    let daysSinceNew = (jd - 2451549.5) % 29.53058867;
-    if (daysSinceNew < 0) daysSinceNew += 29.53058867;
-    if (daysSinceNew < 5.53) return { name: "Neumond 🌑", favoredType: "LONG" };
-    if (daysSinceNew >= 12.91 && daysSinceNew < 20.30) return { name: "Vollmond 🌕", favoredType: "SHORT" };
-    return { name: "Mond Neutral 🌓", favoredType: "NONE" };
 }
 
 function broadcastState() {
@@ -117,14 +120,14 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
+// 3. TRADING ENGINE KERN
+function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
     const now = Date.now();
 
     if (!priceHistory[symbol]) priceHistory[symbol] = [];
     priceHistory[symbol].push(price);
-    // Erweitert auf 180 Ticks, um ein verlässliches 5-Minuten-Fenster abzudecken
     if (priceHistory[symbol].length > 180) priceHistory[symbol].shift();
 
     if (!globalState.agentActive) return;
@@ -147,7 +150,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
         }
     }
 
-    // 1. POSITION ÜBERWACHEN & TRAILING STOP
+    // POSITION ÜBERWACHEN & OPEN-END TRAILING STOP
     if (globalState.inPosition && globalState.position) {
         const pos = globalState.position;
         if (symbol !== pos.symbol) return;
@@ -159,6 +162,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             pos.peakProfitPct = priceChangePct;
         }
 
+        // Break-Even Trigger
         if (pos.peakProfitPct >= 0.25 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.15;
@@ -166,6 +170,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             broadcastState();
         }
 
+        // Dynamisches Trailing
         if (pos.breakEvenTriggered) {
             let targetSL = null;
             if (priceChangePct >= globalState.tp) {
@@ -201,15 +206,24 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             globalState.totalProfit += netProfit;
             globalState.balance += netProfit;
             globalState.tradesCount++;
-            if (netProfit > 0) globalState.winCount++;
+            
+            const isWin = netProfit >= 0;
+            if (isWin) {
+                globalState.winCount++;
+                consecutiveLosses = 0; // Anti-Whipsaw Reset
+            } else {
+                consecutiveLosses++;
+                if (consecutiveLosses >= 2) {
+                    broadcastLog(`⚠️ <span class="text-amber-400 font-bold">ANTI-WHIPSAW:</span> ${consecutiveLosses} Verluste in Folge. Kriterien verschärft.`);
+                }
+            }
 
-            tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000);
+            tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000 * (consecutiveLosses >= 2 ? 2 : 1));
 
             let exitReason = `☁️ ${currentProfile.name} ${symbol} ${pos.type}`;
             if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${currentProfile.timeoutSec}s)`;
             else if (pos.breakEvenTriggered) exitReason = `🛡️ Trailing/Break-Even Ausstieg`;
 
-            const isWin = netProfit >= 0;
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
 
             const newTx = {
@@ -226,21 +240,38 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             broadcastState();
         }
     } 
-    // 2. NEUE POSITION ERÖFFNEN MIT 5-MINUTEN TREND-FILTER
+    // NEUE POSITION ERÖFFNEN MIT OPTIMIERUNGEN
     else if (!globalState.inPosition && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
         const sessionInfo = getSessionMultiplier();
         const currentCvd = cvdEuro[symbol] || 0;
 
         let requiredEuroCvd = currentProfile.cvdThreshold * sessionInfo.multiplier;
+        
+        // 1. Whale Sweep Boost (-30% Schwelle bei Wal-Aktivität)
+        if (now < whaleSpikes[symbol]) {
+            requiredEuroCvd *= 0.70;
+        }
+
+        // 2. Anti-Whipsaw Strafe (+80% Schwelle bei Pechsträhne)
+        if (consecutiveLosses >= 2) {
+            requiredEuroCvd *= 1.80;
+        }
+
         let posType = currentCvd > 0 ? 'LONG' : 'SHORT';
 
         const isValidLong = posType === 'LONG' && isBreakoutLong;
         const isValidShort = posType === 'SHORT' && isBreakoutShort;
         
-        // Prüfe zusätzlich den 5-Minuten Trend
+        // 3. 5-Minuten Trend Check
         const isTrendAligned = check5MinTrend(symbol, price, posType, currentProfile);
 
-        if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort) && isTrendAligned) {
+        // 4. VWAP Overextension Check (Überdehnungs-Schutz)
+        const currentVWAP = getVWAP(symbol, price, euroVolume);
+        const vwapDiffPct = ((price - currentVWAP) / currentVWAP) * 100;
+        const isOverextendedLong = posType === 'LONG' && vwapDiffPct > 0.80;
+        const isOverextendedShort = posType === 'SHORT' && vwapDiffPct < -0.80;
+
+        if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort) && isTrendAligned && !isOverextendedLong && !isOverextendedShort) {
             globalState.inPosition = true;
             globalState.position = {
                 symbol: symbol,
@@ -260,6 +291,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
     }
 }
 
+// 4. WEBSOCKET CLIENT HANDLER
 wss.on('connection', (ws) => {
     clients.add(ws);
     ws.send(JSON.stringify({ type: 'STATE_UPDATE', state: globalState }));
@@ -284,6 +316,7 @@ wss.on('connection', (ws) => {
                 globalState = getInitialState();
                 globalState.agentActive = currentActive;
                 globalState.profileId = currentProfile;
+                consecutiveLosses = 0;
                 broadcastLog(`🔄 <span class="text-indigo-400 font-bold">SYSTEM RESET:</span> Depot zurückgesetzt.`);
                 broadcastState();
                 return;
@@ -310,6 +343,7 @@ wss.on('connection', (ws) => {
     ws.on('close', () => clients.delete(ws));
 });
 
+// 5. BINANCE STREAM INTEGRATION MIT WHALE-SWEEP DETEKTOR
 function connectBinanceStream() {
     const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade/dogeusdt@aggTrade');
     binanceWs.on('message', (data) => {
@@ -322,7 +356,14 @@ function connectBinanceStream() {
                 const quantity = parseFloat(tick.q);
                 const euroVolume = quantity * price;
                 const euroDelta = tick.m ? -euroVolume : euroVolume;
-                processCloudTradingEngine(symbol, price, euroDelta);
+
+                // WHALE SWEEP DETEKTOR
+                if (euroVolume >= 100000) {
+                    whaleSpikes[symbol] = Date.now() + 5000;
+                    broadcastLog(`🐳 <span class="text-cyan-400 font-bold">WHALE SWEEP (${symbol}):</span> Einzelorder über ${Math.round(euroVolume).toLocaleString('de-DE')} € registriert!`);
+                }
+
+                processCloudTradingEngine(symbol, price, euroDelta, euroVolume);
                 broadcastTick(tick);
             }
         } catch (e) {}
@@ -331,5 +372,19 @@ function connectBinanceStream() {
     binanceWs.on('error', () => binanceWs.close());
 }
 
+// 6. RENDER CLOUD SHUTDOWN HANDLER
+function handleShutdown(signal) {
+    console.log(`[Server] ${signal} empfangen: Sichere Systemstatus...`);
+    const payload = JSON.stringify({ 
+        type: 'LOG_EVENT', 
+        log: { time: new Date().toLocaleTimeString('de-DE'), message: '🔄 <span class="text-amber-400 font-bold">CLOUD NEUSTART:</span> Render führt Server-Sync durch. Status bleibt erhalten.' } 
+    });
+    clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
+    setTimeout(() => { process.exit(0); }, 1000);
+}
+
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on('SIGINT', () => handleShutdown('SIGINT'));
+
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] Multi-Profile Engine aktiv auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] Multi-Profile Engine v6.3 Institutional aktiv auf Port ${port}`));
