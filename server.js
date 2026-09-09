@@ -5,7 +5,7 @@ const WebSocket = require('ws');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Multi-Factor Engine Aktiv'));
+app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine mit Log-Historie'));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -25,6 +25,7 @@ function getInitialState() {
         winCount: 0,
         inPosition: false,
         position: null,
+        logs: [], // Server-Speicher für Terminal-Historie
         transactions: [{
             id: Date.now(),
             type: 'DEPOSIT',
@@ -87,9 +88,14 @@ function broadcastTick(data) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// NEU: SENDET SERVER-LOGS AN ALLE VERBUNDENEN TERMINALS
 function broadcastLog(message) {
-    const payload = JSON.stringify({ type: 'LOG_EVENT', message: message });
+    const timeStr = new Date().toLocaleTimeString('de-DE');
+    const logItem = { time: timeStr, message: message };
+    if (!globalState.logs) globalState.logs = [];
+    globalState.logs.unshift(logItem);
+    if (globalState.logs.length > 50) globalState.logs.pop(); // Max 50 Logs aufheben
+
+    const payload = JSON.stringify({ type: 'LOG_EVENT', log: logItem });
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
@@ -135,7 +141,7 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
 
     if (globalState.circuitBreakerActive && now > globalState.circuitBreakerUntil) {
         globalState.circuitBreakerActive = false;
-        broadcastLog(`✅ <span class="text-emerald-400 font-bold">CIRCUIT BREAKER:</span> Markt beruhigt. Neueinstiege wieder aktiv.`);
+        broadcastLog(`✅ <span class="text-emerald-400 font-bold">CIRCUIT BREAKER:</span> Markt beruhigt. Neueinstiege aktiv.`);
         broadcastState();
     }
 
@@ -192,9 +198,7 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             };
             globalState.transactions.push(newTx);
             
-            // TERMINAL LOG SPRAYEN
             broadcastLog(`☁️ <span class="${statusColor} font-bold">${isWin ? '🎯 TAKE-PROFIT' : '🛑 STOP-LOSS / TIMEOUT'} (${symbol}):</span> Closed @ ${price.toFixed(2)} € | Netto: <span class="${statusColor}">${isWin ? '+' : ''}${netProfit.toFixed(2)} €</span>`);
-            
             broadcastState();
         }
     } 
@@ -221,9 +225,7 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             const icon = posType === 'LONG' ? '📈' : '📉';
             const color = posType === 'LONG' ? 'text-emerald-400' : 'text-rose-400';
 
-            // TERMINAL LOG SPRAYEN
             broadcastLog(`☁️ ${icon} <span class="${color} font-bold">24/7 CLOUD ORDER (${symbol} ${globalState.leverage}x):</span> ${posType} Einsatz ${globalState.margin}€ @ ${price.toFixed(2)} € | Session: ${sessionInfo.name}`);
-            
             broadcastState();
         }
     }
@@ -307,4 +309,4 @@ function connectBinanceStream() {
 }
 
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Terminal-Broadcast läuft auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Log-Historie läuft auf Port ${port}`));
