@@ -5,7 +5,7 @@ const WebSocket = require('ws');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine mit Chop-Filter Aktiv'));
+app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine mit 60-Tick Breakout Filter'));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -43,7 +43,7 @@ let globalState = getInitialState();
 let tradeCooldownUntil = 0;
 
 const prices = { BTCEUR: 73000, ETHEUR: 2300, SOLEUR: 96, XRPEUR: 0.58, DOGEEUR: 0.12 };
-const cvdEuro = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 }; // Messung in Euro
+const cvdEuro = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
 const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: [] };
 
 let lastSpikeTime = Date.now();
@@ -99,22 +99,20 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 24/7 SERVER-SEITIGE TRADING LOGIK MIT CHOP-FILTER
+// 24/7 SERVER-SEITIGE TRADING LOGIK
 function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
     prices[symbol] = price;
-    
-    // Akkumuliere CVD basierend auf Euro-Wert anstelle roher Stückzahl
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
-    
     const now = Date.now();
 
     if (!priceHistory[symbol]) priceHistory[symbol] = [];
     priceHistory[symbol].push(price);
-    if (priceHistory[symbol].length > 12) priceHistory[symbol].shift();
+    // ERWEITERT: Speichert jetzt 60 Ticks (ca. 1 Minute echtes Marktgeschehen)
+    if (priceHistory[symbol].length > 60) priceHistory[symbol].shift();
 
     let emergencyCloseTriggered = false;
 
-    // 1. CIRCUIT BREAKER LOGIK (Extreme Spikes)
+    // 1. CIRCUIT BREAKER LOGIK
     if (priceHistory[symbol].length >= 5) {
         const firstPrice = priceHistory[symbol][0];
         const moveDirectionPct = ((price - firstPrice) / firstPrice) * 100; 
@@ -152,16 +150,22 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
 
     if (!globalState.agentActive) return;
 
-    // 2. CHOP & VOLATILITÄTS-FILTER (Verhindert Trades in Flachland-Phasen)
-    let isChopMarket = false;
-    if (priceHistory[symbol].length >= 10) {
+    // 2. CHOP & BREAKOUT-CHECK (1-Minute Fenster)
+    let isChopMarket = true;
+    let isBreakoutLong = false;
+    let isBreakoutShort = false;
+
+    if (priceHistory[symbol].length >= 30) {
         const maxP = Math.max(...priceHistory[symbol]);
         const minP = Math.min(...priceHistory[symbol]);
         const rangePct = ((maxP - minP) / price) * 100;
         
-        // Wenn Kursschwankung der letzten Ticks unter 0.15% liegt -> TOTER MARKT / SQUEEZE
-        if (rangePct < 0.15) {
-            isChopMarket = true;
+        // Mindestbewegung von 0.25% in der letzten Minute gefordert!
+        if (rangePct >= 0.25) {
+            isChopMarket = false;
+            // Preis muss am Höchststand der Minute ausbrechen (LONG) oder am Tiefststand (SHORT)
+            if (price >= maxP * 0.9995) isBreakoutLong = true;
+            if (price <= minP * 1.0005) isBreakoutShort = true;
         }
     }
 
@@ -198,7 +202,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             globalState.tradesCount++;
             if (netProfit > 0) globalState.winCount++;
 
-            tradeCooldownUntil = now + 20000; // 20 Sekunden Pause nach jedem Trade
+            tradeCooldownUntil = now + 20000;
 
             let exitReason = `☁️ 24/7 Cloud Bot ${symbol} ${pos.type}`;
             if (emergencyCloseTriggered) exitReason = `🚨 Flash-Crash Guard`;
@@ -221,21 +225,24 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             broadcastState();
         }
     } 
-    // 4. NEUE POSITION ERÖFFNEN (NUR BEI ECHTER VOLATILITÄT & HOHEM EURO-CVD)
+    // 4. NEUE POSITION ERÖFFNEN (STRIKTER BREAKOUT-ZWANG)
     else if (!globalState.inPosition && !globalState.circuitBreakerActive && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
         const currentCvd = cvdEuro[symbol] || 0;
         const sessionInfo = getSessionMultiplier();
         const lunarInfo = getLunarBias();
 
-        // Mindest-Euro-Volumen-Delta (z. B. 40.000 € kumulierter Netto-Kaufdruck)
-        let requiredEuroCvd = 40000 * sessionInfo.multiplier;
+        let requiredEuroCvd = 50000 * sessionInfo.multiplier; // Hürde auf 50.000 € angehoben
         let posType = currentCvd > 0 ? 'LONG' : 'SHORT';
 
         if (posType === lunarInfo.favoredType) {
             requiredEuroCvd *= 0.80;
         }
 
-        if (Math.abs(currentCvd) >= requiredEuroCvd) {
+        // PRÜFUNG: Hohes CVD UND tatsächlicher Preis-Ausbruch aus der Minute!
+        const isValidLong = posType === 'LONG' && isBreakoutLong;
+        const isValidShort = posType === 'SHORT' && isBreakoutShort;
+
+        if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort)) {
             globalState.inPosition = true;
             globalState.position = {
                 symbol: symbol,
@@ -246,7 +253,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             const icon = posType === 'LONG' ? '📈' : '📉';
             const color = posType === 'LONG' ? 'text-emerald-400' : 'text-rose-400';
 
-            broadcastLog(`☁️ ${icon} <span class="${color} font-bold">24/7 CLOUD ORDER (${symbol} ${globalState.leverage}x):</span> ${posType} Einsatz ${globalState.margin}€ @ ${price.toFixed(2)} € | Session: ${sessionInfo.name}`);
+            broadcastLog(`☁️ ${icon} <span class="${color} font-bold">24/7 BREAKOUT ORDER (${symbol} ${globalState.leverage}x):</span> ${posType} Einsatz ${globalState.margin}€ @ ${price.toFixed(2)} € | Session: ${sessionInfo.name}`);
             broadcastState();
         }
     }
@@ -318,8 +325,6 @@ function connectBinanceStream() {
             if (symbol) {
                 const price = parseFloat(tick.p) * 0.92;
                 const quantity = parseFloat(tick.q);
-                
-                // BERECHNE EURO-VOLUMEN-DELTA (Preis * Stückzahl)
                 const euroVolume = quantity * price;
                 const euroDelta = tick.m ? -euroVolume : euroVolume;
                 
@@ -334,4 +339,4 @@ function connectBinanceStream() {
 }
 
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Chop-Sperre läuft auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit 60-Tick Breakout Filter läuft auf Port ${port}`));
