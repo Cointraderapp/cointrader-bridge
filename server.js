@@ -12,33 +12,35 @@ const wss = new WebSocket.Server({ server });
 
 const clients = new Set();
 
-// ==========================================
-// ZENTRALER 24/7 CLOUD STATE
-// ==========================================
-let globalState = {
-    agentActive: true,
-    leverage: 50,
-    margin: 5000,
-    tp: 0.75,
-    sl: 1.25,
-    balance: 20000,
-    totalProfit: 0,
-    tradesCount: 0,
-    winCount: 0,
-    inPosition: false,
-    position: null,
-    transactions: [],
-    circuitBreakerActive: false,
-    circuitBreakerUntil: 0
-};
+// INITIAL ZUSTAND
+function getInitialState() {
+    return {
+        agentActive: true,
+        leverage: 50,
+        margin: 5000,
+        tp: 0.75,
+        sl: 1.25,
+        balance: 20000,
+        totalProfit: 0,
+        tradesCount: 0,
+        winCount: 0,
+        inPosition: false,
+        position: null,
+        transactions: [],
+        circuitBreakerActive: false,
+        circuitBreakerUntil: 0
+    };
+}
+
+let globalState = getInitialState();
+let tradeCooldownUntil = 0; // Cooldown-Timer gegen Dauer-Trades
 
 const prices = { BTCEUR: 72200, ETHEUR: 2280, SOLEUR: 95, XRPEUR: 1.30, DOGEEUR: 0.082 };
 const cvd = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
 const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: [] };
 
-// Variablen für den dynamischen Zyklus-Messer
 let lastSpikeTime = Date.now();
-let spikeIntervals = [120000]; // Startwert: 120 Sekunden
+let spikeIntervals = [120000];
 
 function broadcastState() {
     const payload = JSON.stringify({ type: 'STATE_UPDATE', state: globalState });
@@ -50,7 +52,7 @@ function broadcastTick(data) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 24/7 SERVER-SEITIGE TRADING LOGIK (SMART BREAKER & DYNAMIC TIMEOUT)
+// 24/7 SERVER-SEITIGE TRADING LOGIK
 function processCloudTradingEngine(symbol, price, tradeDelta) {
     prices[symbol] = price;
     cvd[symbol] = Math.round((cvd[symbol] || 0) + tradeDelta * 10) * 0.985;
@@ -68,17 +70,15 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
         const moveDirectionPct = ((price - firstPrice) / firstPrice) * 100; 
         const moveAbsPct = Math.abs(moveDirectionPct);
 
-        // 1. Messung der Markt-Atemzüge (für das dynamische Timeout)
         if (moveAbsPct >= 0.20) {
             const timeSinceLastSpike = now - lastSpikeTime;
-            if (timeSinceLastSpike > 15000) { // Spikes müssen mind. 15s auseinander liegen
+            if (timeSinceLastSpike > 15000) {
                 spikeIntervals.push(timeSinceLastSpike);
-                if (spikeIntervals.length > 5) spikeIntervals.shift(); // Letzte 5 Zyklen merken
+                if (spikeIntervals.length > 5) spikeIntervals.shift();
                 lastSpikeTime = now;
             }
         }
 
-        // 2. Harter Circuit Breaker (Flash Crash)
         if (moveAbsPct >= 0.80) {
             globalState.circuitBreakerActive = true;
             globalState.circuitBreakerUntil = now + (120 * 1000); 
@@ -111,12 +111,10 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
 
         const totalVol = globalState.margin * globalState.leverage;
         const grossProfit = totalVol * (priceChangePct / 100);
-        const fee = totalVol * 0.0015; // 0.15% Taker-Fee Simulation (beide Richtungen)
+        const fee = totalVol * 0.0015;
         const netProfit = grossProfit - fee;
 
-        // Dynamisches Timeout berechnen
         const avgSpikeIntervalMs = spikeIntervals.reduce((a, b) => a + b, 0) / spikeIntervals.length;
-        // Faktor 1.25 = Wir geben dem Markt 25% mehr Zeit als sein aktueller Rhythmus vorgibt
         const dynamicTimeoutSec = Math.max(90, Math.round((avgSpikeIntervalMs / 1000) * 1.25)); 
         
         const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
@@ -124,13 +122,10 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
         const hasMomentum = (pos.type === 'LONG' && currentCvd >= 300) || (pos.type === 'SHORT' && currentCvd <= -300);
 
         let timeoutTriggered = false;
-        // Wenn die Zeit abgelaufen ist und der Markt keinen Druck (CVD) in unsere Richtung aufbaut
         if (!hasMomentum && timeInTradeSec >= dynamicTimeoutSec) {
             timeoutTriggered = true;
-            console.log(`[Smart Timeout] Markt-Zyklus betrug zuletzt ${Math.round(avgSpikeIntervalMs/1000)}s. Timeout ausgelöst bei ${dynamicTimeoutSec}s.`);
         }
 
-        // Schließen bei TP, SL, Circuit Breaker Notausstieg oder dynamischem Timeout
         if (priceChangePct >= globalState.tp || priceChangePct <= -globalState.sl || emergencyCloseTriggered || timeoutTriggered) {
             globalState.inPosition = false;
             globalState.position = null;
@@ -138,6 +133,8 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             globalState.balance += netProfit;
             globalState.tradesCount++;
             if (netProfit > 0) globalState.winCount++;
+
+            tradeCooldownUntil = now + 15000; // 15 Sekunden Pause vor neuem Trade
 
             let exitReason = `☁️ 24/7 Cloud Bot ${symbol} ${pos.type}`;
             if (emergencyCloseTriggered) exitReason = `🚨 Flash-Crash Guard`;
@@ -156,10 +153,10 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             broadcastState();
         }
     } 
-    // 2. Neue Position eröffnen
-    else if (!globalState.inPosition && !globalState.circuitBreakerActive && globalState.balance >= globalState.margin) {
+    // 2. Neue Position eröffnen (NUR WENN COOLDOWN ABGELAUFEN IST)
+    else if (!globalState.inPosition && !globalState.circuitBreakerActive && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
         const currentCvd = cvd[symbol] || 0;
-        if (Math.abs(currentCvd) > 1200) {
+        if (Math.abs(currentCvd) > 1500) {
             const posType = currentCvd > 0 ? 'LONG' : 'SHORT';
             globalState.inPosition = true;
             globalState.position = {
@@ -182,6 +179,15 @@ wss.on('connection', (ws) => {
     ws.on('message', (message) => {
         try {
             const parsed = JSON.parse(message);
+            
+            // RESET-BEFEHL ERHALTEN
+            if (parsed.type === 'RESET_STATE') {
+                globalState = getInitialState();
+                console.log(`[Server] Depot per Reset-Signal auf 20.000 € zurückgesetzt.`);
+                broadcastState();
+                return;
+            }
+
             if (parsed.type === 'PARAM_UPDATE' && parsed.data) {
                 if (parsed.data.leverage !== undefined) globalState.leverage = parsed.data.leverage;
                 if (parsed.data.margin !== undefined) globalState.margin = parsed.data.margin;
@@ -220,4 +226,4 @@ function connectBinanceStream() {
 }
 
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit dynamischem Timeout läuft auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Reset-Sync läuft auf Port ${port}`));
