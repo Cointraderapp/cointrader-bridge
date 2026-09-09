@@ -5,20 +5,61 @@ const WebSocket = require('ws');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine mit 60-Tick Breakout Filter'));
+app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine (Multi-Profile Support)'));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const clients = new Set();
 
-function getInitialState() {
-    return {
-        agentActive: true,
+const PROFILES = {
+    SAVE: {
+        id: 'SAVE',
+        name: 'Top5-Save 🛡️',
+        cvdThreshold: 80000,
+        minRangePct: 0.40,
+        leverage: 10,
+        margin: 2000,
+        tp: 0.50,
+        sl: 0.60,
+        timeoutSec: 75,
+        cooldownSec: 30
+    },
+    MEDIUM: {
+        id: 'MEDIUM',
+        name: 'Top5-Medium ⚖️',
+        cvdThreshold: 40000,
+        minRangePct: 0.20,
+        leverage: 20,
+        margin: 2000,
+        tp: 0.60,
+        sl: 0.80,
+        timeoutSec: 90,
+        cooldownSec: 20
+    },
+    RISK: {
+        id: 'RISK',
+        name: 'Top5-Risk ⚡',
+        cvdThreshold: 15000,
+        minRangePct: 0.10,
         leverage: 50,
-        margin: 5000,
-        tp: 0.75,
-        sl: 1.25,
+        margin: 2000,
+        tp: 0.30,
+        sl: 0.40,
+        timeoutSec: 45,
+        cooldownSec: 10
+    }
+};
+
+function getInitialState() {
+    const defaultProfile = PROFILES.MEDIUM;
+    return {
+        profileId: 'MEDIUM',
+        agentActive: true,
+        leverage: defaultProfile.leverage,
+        margin: defaultProfile.margin,
+        tp: defaultProfile.tp,
+        sl: defaultProfile.sl,
         balance: 20000,
         totalProfit: 0,
         tradesCount: 0,
@@ -31,8 +72,8 @@ function getInitialState() {
             type: 'DEPOSIT',
             eur: 20000,
             timestamp: Date.now(),
-            entryPrice: 73000,
-            note: 'Startkapital Reset'
+            entryPrice: 72700,
+            note: 'Startkapital System'
         }],
         circuitBreakerActive: false,
         circuitBreakerUntil: 0
@@ -42,40 +83,18 @@ function getInitialState() {
 let globalState = getInitialState();
 let tradeCooldownUntil = 0;
 
-const prices = { BTCEUR: 73000, ETHEUR: 2300, SOLEUR: 96, XRPEUR: 0.58, DOGEEUR: 0.12 };
+const prices = { BTCEUR: 72700, ETHEUR: 2290, SOLEUR: 95.4, XRPEUR: 0.58, DOGEEUR: 0.12 };
 const cvdEuro = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
 const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: [] };
-
-let lastSpikeTime = Date.now();
-let spikeIntervals = [120000];
 
 function getSessionMultiplier() {
     const utcHour = new Date().getUTCHours();
     const isLondon = utcHour >= 7 && utcHour < 16;
     const isNY = utcHour >= 12 && utcHour < 21;
 
-    if (isLondon && isNY) {
-        return { name: "LONDON+NY OVERLAP 🔥", multiplier: 0.75 };
-    } else if (isLondon || isNY) {
-        return { name: "MAIN SESSION 📈", multiplier: 1.0 };
-    } else {
-        return { name: "OFF-HOURS / ASIEN 🌙", multiplier: 1.4 };
-    }
-}
-
-function getLunarBias() {
-    const date = new Date();
-    let year = date.getUTCFullYear(), month = date.getUTCMonth() + 1, day = date.getUTCDate();
-    if (month < 3) { year--; month += 12; }
-    let a = Math.floor(year / 100), b = Math.floor(a / 4), c = 2 - a + b;
-    let e = Math.floor(365.25 * (year + 4716)), f = Math.floor(30.6001 * (month + 1));
-    let jd = c + day + e + f - 1524.5;
-    let daysSinceNew = (jd - 2451549.5) % 29.53058867;
-    if (daysSinceNew < 0) daysSinceNew += 29.53058867;
-
-    if (daysSinceNew < 5.53) return { name: "Neumond 🌑", favoredType: "LONG" };
-    if (daysSinceNew >= 12.91 && daysSinceNew < 20.30) return { name: "Vollmond 🌕", favoredType: "SHORT" };
-    return { name: "Mond Neutral 🌓", favoredType: "NONE" };
+    if (isLondon && isNY) return { name: "LONDON+NY OVERLAP 🔥", multiplier: 0.85 };
+    if (isLondon || isNY) return { name: "MAIN SESSION 📈", multiplier: 1.0 };
+    return { name: "OFF-HOURS / ASIEN 🌙", multiplier: 1.3 };
 }
 
 function broadcastState() {
@@ -99,7 +118,6 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 24/7 SERVER-SEITIGE TRADING LOGIK
 function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
@@ -107,69 +125,30 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
 
     if (!priceHistory[symbol]) priceHistory[symbol] = [];
     priceHistory[symbol].push(price);
-    // ERWEITERT: Speichert jetzt 60 Ticks (ca. 1 Minute echtes Marktgeschehen)
     if (priceHistory[symbol].length > 60) priceHistory[symbol].shift();
-
-    let emergencyCloseTriggered = false;
-
-    // 1. CIRCUIT BREAKER LOGIK
-    if (priceHistory[symbol].length >= 5) {
-        const firstPrice = priceHistory[symbol][0];
-        const moveDirectionPct = ((price - firstPrice) / firstPrice) * 100; 
-        const moveAbsPct = Math.abs(moveDirectionPct);
-
-        if (moveAbsPct >= 0.20) {
-            const timeSinceLastSpike = now - lastSpikeTime;
-            if (timeSinceLastSpike > 15000) {
-                spikeIntervals.push(timeSinceLastSpike);
-                if (spikeIntervals.length > 5) spikeIntervals.shift();
-                lastSpikeTime = now;
-            }
-        }
-
-        if (moveAbsPct >= 0.80) {
-            globalState.circuitBreakerActive = true;
-            globalState.circuitBreakerUntil = now + (120 * 1000); 
-
-            if (globalState.inPosition && globalState.position && globalState.position.symbol === symbol) {
-                const pos = globalState.position;
-                const isAgainstLong = pos.type === 'LONG' && moveDirectionPct <= -0.80; 
-                const isAgainstShort = pos.type === 'SHORT' && moveDirectionPct >= 0.80; 
-                if (isAgainstLong || isAgainstShort) emergencyCloseTriggered = true;
-            }
-            broadcastLog(`🚨 <span class="text-rose-400 font-bold">CIRCUIT BREAKER:</span> Volatilitäts-Spike (${moveDirectionPct.toFixed(2)}%). Pausiert.`);
-            broadcastState();
-        }
-    }
-
-    if (globalState.circuitBreakerActive && now > globalState.circuitBreakerUntil) {
-        globalState.circuitBreakerActive = false;
-        broadcastLog(`✅ <span class="text-emerald-400 font-bold">CIRCUIT BREAKER:</span> Markt beruhigt. Neueinstiege aktiv.`);
-        broadcastState();
-    }
 
     if (!globalState.agentActive) return;
 
-    // 2. CHOP & BREAKOUT-CHECK (1-Minute Fenster)
+    const currentProfile = PROFILES[globalState.profileId] || PROFILES.MEDIUM;
+
+    // 1. DYNAMISCHER BREAKOUT CHECK GEGEN AKTIVES PROFIL
     let isChopMarket = true;
     let isBreakoutLong = false;
     let isBreakoutShort = false;
 
-    if (priceHistory[symbol].length >= 30) {
+    if (priceHistory[symbol].length >= 20) {
         const maxP = Math.max(...priceHistory[symbol]);
         const minP = Math.min(...priceHistory[symbol]);
         const rangePct = ((maxP - minP) / price) * 100;
         
-        // Mindestbewegung von 0.25% in der letzten Minute gefordert!
-        if (rangePct >= 0.25) {
+        if (rangePct >= currentProfile.minRangePct) {
             isChopMarket = false;
-            // Preis muss am Höchststand der Minute ausbrechen (LONG) oder am Tiefststand (SHORT)
-            if (price >= maxP * 0.9995) isBreakoutLong = true;
-            if (price <= minP * 1.0005) isBreakoutShort = true;
+            if (price >= maxP * 0.9996) isBreakoutLong = true;
+            if (price <= minP * 1.0004) isBreakoutShort = true;
         }
     }
 
-    // 3. POSITION ÜBERWACHEN & SCHLIESSEN
+    // 2. POSITION ÜBERWACHEN & AUSSTIEG
     if (globalState.inPosition && globalState.position) {
         const pos = globalState.position;
         if (symbol !== pos.symbol) return;
@@ -179,22 +158,19 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
 
         const totalVol = globalState.margin * globalState.leverage;
         const grossProfit = totalVol * (priceChangePct / 100);
-        const fee = totalVol * 0.0015;
+        const fee = totalVol * 0.0012;
         const netProfit = grossProfit - fee;
 
-        const avgSpikeIntervalMs = spikeIntervals.reduce((a, b) => a + b, 0) / spikeIntervals.length;
-        const dynamicTimeoutSec = Math.max(90, Math.round((avgSpikeIntervalMs / 1000) * 1.25)); 
-        
         const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
         const currentCvd = cvdEuro[symbol] || 0;
-        const hasMomentum = (pos.type === 'LONG' && currentCvd >= 25000) || (pos.type === 'SHORT' && currentCvd <= -25000);
+        const hasMomentum = (pos.type === 'LONG' && currentCvd >= 10000) || (pos.type === 'SHORT' && currentCvd <= -10000);
 
         let timeoutTriggered = false;
-        if (!hasMomentum && timeInTradeSec >= dynamicTimeoutSec) {
+        if (!hasMomentum && timeInTradeSec >= currentProfile.timeoutSec) {
             timeoutTriggered = true;
         }
 
-        if (priceChangePct >= globalState.tp || priceChangePct <= -globalState.sl || emergencyCloseTriggered || timeoutTriggered) {
+        if (priceChangePct >= globalState.tp || priceChangePct <= -globalState.sl || timeoutTriggered) {
             globalState.inPosition = false;
             globalState.position = null;
             globalState.totalProfit += netProfit;
@@ -202,11 +178,10 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             globalState.tradesCount++;
             if (netProfit > 0) globalState.winCount++;
 
-            tradeCooldownUntil = now + 20000;
+            tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000);
 
-            let exitReason = `☁️ 24/7 Cloud Bot ${symbol} ${pos.type}`;
-            if (emergencyCloseTriggered) exitReason = `🚨 Flash-Crash Guard`;
-            if (timeoutTriggered) exitReason = `⏱️ Dyn. Timeout (${dynamicTimeoutSec}s)`;
+            let exitReason = `☁️ ${currentProfile.name} ${symbol} ${pos.type}`;
+            if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${currentProfile.timeoutSec}s)`;
 
             const isWin = netProfit >= 0;
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
@@ -225,20 +200,14 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             broadcastState();
         }
     } 
-    // 4. NEUE POSITION ERÖFFNEN (STRIKTER BREAKOUT-ZWANG)
-    else if (!globalState.inPosition && !globalState.circuitBreakerActive && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
-        const currentCvd = cvdEuro[symbol] || 0;
+    // 3. NEUE POSITION ERÖFFNEN
+    else if (!globalState.inPosition && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
         const sessionInfo = getSessionMultiplier();
-        const lunarInfo = getLunarBias();
+        const currentCvd = cvdEuro[symbol] || 0;
 
-        let requiredEuroCvd = 50000 * sessionInfo.multiplier; // Hürde auf 50.000 € angehoben
+        let requiredEuroCvd = currentProfile.cvdThreshold * sessionInfo.multiplier;
         let posType = currentCvd > 0 ? 'LONG' : 'SHORT';
 
-        if (posType === lunarInfo.favoredType) {
-            requiredEuroCvd *= 0.80;
-        }
-
-        // PRÜFUNG: Hohes CVD UND tatsächlicher Preis-Ausbruch aus der Minute!
         const isValidLong = posType === 'LONG' && isBreakoutLong;
         const isValidShort = posType === 'SHORT' && isBreakoutShort;
 
@@ -253,7 +222,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             const icon = posType === 'LONG' ? '📈' : '📉';
             const color = posType === 'LONG' ? 'text-emerald-400' : 'text-rose-400';
 
-            broadcastLog(`☁️ ${icon} <span class="${color} font-bold">24/7 BREAKOUT ORDER (${symbol} ${globalState.leverage}x):</span> ${posType} Einsatz ${globalState.margin}€ @ ${price.toFixed(2)} € | Session: ${sessionInfo.name}`);
+            broadcastLog(`☁️ ${icon} <span class="${color} font-bold">${currentProfile.name} ORDER (${symbol} ${globalState.leverage}x):</span> ${posType} Einsatz ${globalState.margin}€ @ ${price.toFixed(2)} €`);
             broadcastState();
         }
     }
@@ -267,22 +236,27 @@ wss.on('connection', (ws) => {
         try {
             const parsed = JSON.parse(message);
             
+            if (parsed.type === 'SET_PROFILE' && parsed.profileId && PROFILES[parsed.profileId]) {
+                const prof = PROFILES[parsed.profileId];
+                globalState.profileId = parsed.profileId;
+                globalState.leverage = prof.leverage;
+                globalState.margin = prof.margin;
+                globalState.tp = prof.tp;
+                globalState.sl = prof.sl;
+
+                broadcastLog(`⚙️ <span class="text-indigo-400 font-bold">PROFIL GEWECHSELT:</span> Aktiviert: ${prof.name} (${prof.leverage}x | CVD > ${prof.cvdThreshold.toLocaleString('de-DE')} €)`);
+                broadcastState();
+                return;
+            }
+
             if (parsed.type === 'RESET_STATE') {
                 const currentActive = globalState.agentActive;
-                const currentLev = globalState.leverage;
-                const currentMar = globalState.margin;
-                const currentTp = globalState.tp;
-                const currentSl = globalState.sl;
-                
+                const currentProfile = globalState.profileId;
                 globalState = getInitialState();
-                
                 globalState.agentActive = currentActive;
-                globalState.leverage = currentLev;
-                globalState.margin = currentMar;
-                globalState.tp = currentTp;
-                globalState.sl = currentSl;
+                globalState.profileId = currentProfile;
 
-                broadcastLog(`🔄 <span class="text-indigo-400 font-bold">SYSTEM RESET:</span> Depot per Befehl zurückgesetzt.`);
+                broadcastLog(`🔄 <span class="text-indigo-400 font-bold">SYSTEM RESET:</span> Depot zurückgesetzt.`);
                 broadcastState();
                 return;
             }
@@ -299,12 +273,9 @@ wss.on('connection', (ws) => {
 
             if (parsed.type === 'TX_UPDATE' && parsed.tx) {
                 globalState.transactions.push(parsed.tx);
-                if (parsed.tx.type === 'DEPOSIT') {
-                    globalState.balance += parsed.tx.eur;
-                } else if (parsed.tx.type === 'WITHDRAW') {
-                    globalState.balance -= parsed.tx.eur;
-                }
-                broadcastLog(`💶 <span class="text-emerald-400 font-bold">DEPOSIT/WITHDRAW:</span> ${parsed.tx.type} über ${parsed.tx.eur} € erfasst.`);
+                if (parsed.tx.type === 'DEPOSIT') globalState.balance += parsed.tx.eur;
+                else if (parsed.tx.type === 'WITHDRAW') globalState.balance -= parsed.tx.eur;
+                broadcastLog(`💶 <span class="text-emerald-400 font-bold">DEPOSIT/WITHDRAW:</span> ${parsed.tx.type} über ${parsed.tx.eur} €.`);
                 broadcastState();
                 return;
             }
@@ -315,12 +286,14 @@ wss.on('connection', (ws) => {
 });
 
 function connectBinanceStream() {
-    const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade');
+    const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade/dogeusdt@aggTrade');
 
     binanceWs.on('message', (data) => {
         try {
             const tick = JSON.parse(data);
-            const symbolMap = { 'BTCUSDT': 'BTCEUR', 'ETHUSDT': 'ETHEUR', 'SOLUSDT': 'SOLEUR' };
+            const symbolMap = { 
+                'BTCUSDT': 'BTCEUR', 'ETHUSDT': 'ETHEUR', 'SOLUSDT': 'SOLEUR', 'XRPUSDT': 'XRPEUR', 'DOGEUSDT': 'DOGEEUR'
+            };
             const symbol = symbolMap[tick.s];
             if (symbol) {
                 const price = parseFloat(tick.p) * 0.92;
@@ -339,4 +312,4 @@ function connectBinanceStream() {
 }
 
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit 60-Tick Breakout Filter läuft auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] Multi-Profile Engine aktiv auf Port ${port}`));
