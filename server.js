@@ -5,14 +5,13 @@ const WebSocket = require('ws');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Smart Engine Aktiv'));
+app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Multi-Factor Engine Aktiv'));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const clients = new Set();
 
-// INITIAL ZUSTAND
 function getInitialState() {
     return {
         agentActive: true,
@@ -33,7 +32,7 @@ function getInitialState() {
 }
 
 let globalState = getInitialState();
-let tradeCooldownUntil = 0; // Cooldown-Timer gegen Dauer-Trades
+let tradeCooldownUntil = 0;
 
 const prices = { BTCEUR: 72200, ETHEUR: 2280, SOLEUR: 95, XRPEUR: 1.30, DOGEEUR: 0.082 };
 const cvd = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
@@ -41,6 +40,39 @@ const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: 
 
 let lastSpikeTime = Date.now();
 let spikeIntervals = [120000];
+
+// ==========================================
+// TENDENZGEBER: SESSION & MONDPHASEN ENGINES
+// ==========================================
+
+function getSessionMultiplier() {
+    const utcHour = new Date().getUTCHours();
+    const isLondon = utcHour >= 7 && utcHour < 16;
+    const isNY = utcHour >= 12 && utcHour < 21;
+
+    if (isLondon && isNY) {
+        return { name: "LONDON+NY OVERLAP 🔥", multiplier: 0.75 }; // 25% leichtere Hürde bei Hohem Volumen
+    } else if (isLondon || isNY) {
+        return { name: "MAIN SESSION 📈", multiplier: 1.0 };
+    } else {
+        return { name: "OFF-HOURS / ASIEN 🌙", multiplier: 1.4 }; // 40% striktere Hürde in ruhigen Zeiten
+    }
+}
+
+function getLunarBias() {
+    const date = new Date();
+    let year = date.getUTCFullYear(), month = date.getUTCMonth() + 1, day = date.getUTCDate();
+    if (month < 3) { year--; month += 12; }
+    let a = Math.floor(year / 100), b = Math.floor(a / 4), c = 2 - a + b;
+    let e = Math.floor(365.25 * (year + 4716)), f = Math.floor(30.6001 * (month + 1));
+    let jd = c + day + e + f - 1524.5;
+    let daysSinceNew = (jd - 2451549.5) % 29.53058867;
+    if (daysSinceNew < 0) daysSinceNew += 29.53058867;
+
+    if (daysSinceNew < 5.53) return { name: "Neumond 🌑", favoredType: "LONG" };
+    if (daysSinceNew >= 12.91 && daysSinceNew < 20.30) return { name: "Vollmond 🌕", favoredType: "SHORT" };
+    return { name: "Mond Neutral 🌓", favoredType: "NONE" };
+}
 
 function broadcastState() {
     const payload = JSON.stringify({ type: 'STATE_UPDATE', state: globalState });
@@ -64,7 +96,7 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
 
     let emergencyCloseTriggered = false;
 
-    // MARKT-ZYKLUS & CIRCUIT BREAKER LOGIK
+    // MARKT-ZYKLUS & CIRCUIT BREAKER
     if (priceHistory[symbol].length >= 5) {
         const firstPrice = priceHistory[symbol][0];
         const moveDirectionPct = ((price - firstPrice) / firstPrice) * 100; 
@@ -134,7 +166,7 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             globalState.tradesCount++;
             if (netProfit > 0) globalState.winCount++;
 
-            tradeCooldownUntil = now + 15000; // 15 Sekunden Pause vor neuem Trade
+            tradeCooldownUntil = now + 15000;
 
             let exitReason = `☁️ 24/7 Cloud Bot ${symbol} ${pos.type}`;
             if (emergencyCloseTriggered) exitReason = `🚨 Flash-Crash Guard`;
@@ -153,11 +185,22 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             broadcastState();
         }
     } 
-    // 2. Neue Position eröffnen (NUR WENN COOLDOWN ABGELAUFEN IST)
+    // 2. Neue Position eröffnen (MIT SESSION & MOND MULTIPLIKATOR)
     else if (!globalState.inPosition && !globalState.circuitBreakerActive && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
         const currentCvd = cvd[symbol] || 0;
-        if (Math.abs(currentCvd) > 1500) {
-            const posType = currentCvd > 0 ? 'LONG' : 'SHORT';
+        const sessionInfo = getSessionMultiplier();
+        const lunarInfo = getLunarBias();
+
+        // Dynamische CVD-Schwelle berechnen
+        let requiredCvd = 1500 * sessionInfo.multiplier;
+        let posType = currentCvd > 0 ? 'LONG' : 'SHORT';
+
+        // Mond-Bonus: Wenn das Signal mit der Mondphase übereinstimmt, sinkt die Hürde um 20%
+        if (posType === lunarInfo.favoredType) {
+            requiredCvd *= 0.80;
+        }
+
+        if (Math.abs(currentCvd) >= requiredCvd) {
             globalState.inPosition = true;
             globalState.position = {
                 symbol: symbol,
@@ -165,7 +208,7 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
                 buyPrice: price,
                 buyTime: Date.now()
             };
-            console.log(`[Cloud Engine] Neue Position: ${posType} auf ${symbol} @ ${price} €`);
+            console.log(`[Cloud Engine] ${posType} auf ${symbol} @ ${price}€ | Session: ${sessionInfo.name} | Mond: ${lunarInfo.name}`);
             broadcastState();
         }
     }
@@ -179,11 +222,9 @@ wss.on('connection', (ws) => {
     ws.on('message', (message) => {
         try {
             const parsed = JSON.parse(message);
-            
-            // RESET-BEFEHL ERHALTEN
             if (parsed.type === 'RESET_STATE') {
                 globalState = getInitialState();
-                console.log(`[Server] Depot per Reset-Signal auf 20.000 € zurückgesetzt.`);
+                console.log(`[Server] Depot per Reset-Signal zurückgesetzt.`);
                 broadcastState();
                 return;
             }
@@ -226,4 +267,4 @@ function connectBinanceStream() {
 }
 
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Reset-Sync läuft auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] 24/7 Multi-Factor Cloud Engine auf Port ${port}`));
