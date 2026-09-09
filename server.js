@@ -5,7 +5,7 @@ const WebSocket = require('ws');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine (Multi-Profile + Trailing Stop)'));
+app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine (5-Min Trend Filter Active)'));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -13,9 +13,9 @@ const wss = new WebSocket.Server({ server });
 const clients = new Set();
 
 const PROFILES = {
-    SAVE: { id: 'SAVE', name: 'Top5-Save 🛡️', cvdThreshold: 80000, minRangePct: 0.40, leverage: 10, margin: 2000, tp: 0.50, sl: 0.60, timeoutSec: 75, cooldownSec: 30 },
-    MEDIUM: { id: 'MEDIUM', name: 'Top5-Medium ⚖️', cvdThreshold: 40000, minRangePct: 0.20, leverage: 20, margin: 2000, tp: 0.60, sl: 0.80, timeoutSec: 90, cooldownSec: 20 },
-    RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 15000, minRangePct: 0.10, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10 }
+    SAVE: { id: 'SAVE', name: 'Top5-Save 🛡️', cvdThreshold: 80000, minRangePct: 0.40, leverage: 10, margin: 2000, tp: 0.50, sl: 0.60, timeoutSec: 75, cooldownSec: 30, use5MinTrend: true },
+    MEDIUM: { id: 'MEDIUM', name: 'Top5-Medium ⚖️', cvdThreshold: 40000, minRangePct: 0.20, leverage: 20, margin: 2000, tp: 0.60, sl: 0.80, timeoutSec: 90, cooldownSec: 20, use5MinTrend: true },
+    RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 15000, minRangePct: 0.10, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10, use5MinTrend: false }
 };
 
 function getInitialState() {
@@ -53,6 +53,24 @@ let tradeCooldownUntil = 0;
 const prices = { BTCEUR: 72700, ETHEUR: 2290, SOLEUR: 95.4, XRPEUR: 0.58, DOGEEUR: 0.12 };
 const cvdEuro = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
 const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: [] };
+
+function check5MinTrend(symbol, currentPrice, type, profile) {
+    if (!profile.use5MinTrend) return true; // Risk-Modus überspringt den Filter
+
+    const history = priceHistory[symbol];
+    if (!history || history.length < 30) return true; // Aufwärmphase erlauben
+
+    // Berechne den Durchschnitt der ältesten Ticks im Speicher (5-Min-Fenster)
+    const sampleSize = Math.min(20, Math.floor(history.length / 3));
+    const oldPriceAvg = history.slice(0, sampleSize).reduce((a, b) => a + b, 0) / sampleSize;
+
+    if (type === 'LONG') {
+        return currentPrice > oldPriceAvg; // LONG nur wenn über 5-Min-Trend
+    } else if (type === 'SHORT') {
+        return currentPrice < oldPriceAvg; // SHORT nur wenn unter 5-Min-Trend
+    }
+    return true;
+}
 
 function getSessionMultiplier() {
     const utcHour = new Date().getUTCHours();
@@ -106,7 +124,8 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
 
     if (!priceHistory[symbol]) priceHistory[symbol] = [];
     priceHistory[symbol].push(price);
-    if (priceHistory[symbol].length > 60) priceHistory[symbol].shift();
+    // Erweitert auf 180 Ticks, um ein verlässliches 5-Minuten-Fenster abzudecken
+    if (priceHistory[symbol].length > 180) priceHistory[symbol].shift();
 
     if (!globalState.agentActive) return;
 
@@ -117,8 +136,8 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
     let isBreakoutShort = false;
 
     if (priceHistory[symbol].length >= 20) {
-        const maxP = Math.max(...priceHistory[symbol]);
-        const minP = Math.min(...priceHistory[symbol]);
+        const maxP = Math.max(...priceHistory[symbol].slice(-60));
+        const minP = Math.min(...priceHistory[symbol].slice(-60));
         const rangePct = ((maxP - minP) / price) * 100;
         
         if (rangePct >= currentProfile.minRangePct) {
@@ -136,29 +155,25 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
         let priceChangePct = ((price - pos.buyPrice) / pos.buyPrice) * 100;
         if (pos.type === 'SHORT') priceChangePct = -priceChangePct;
 
-        // Trailing & Break-Even Berechnungen
         if (priceChangePct > pos.peakProfitPct) {
             pos.peakProfitPct = priceChangePct;
         }
 
-        // Break-Even Trigger (+0.25% Profit erreicht -> Sichert +0.15%)
         if (pos.peakProfitPct >= 0.25 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
-            pos.dynamicSLPct = -0.15; // Setzt SL ins Plus (Blau Linie)
+            pos.dynamicSLPct = -0.15;
             broadcastLog(`🛡️ <span class="text-indigo-400 font-bold">BREAK-EVEN:</span> SL auf +0.15% gesichert.`);
             broadcastState();
         }
 
-        // Gleitender Trailing Stop (zieht nach oben mit)
         if (pos.breakEvenTriggered) {
             let targetSL = null;
             if (priceChangePct >= globalState.tp) {
-                targetSL = priceChangePct - 0.15; // Wenn Ziel erreicht: SL extrem eng ranholen!
+                targetSL = priceChangePct - 0.15;
             } else if (priceChangePct >= 0.40) {
-                targetSL = priceChangePct - 0.20; // Etwas Spielraum
+                targetSL = priceChangePct - 0.20;
             }
 
-            // Updatet den SL nur, wenn der neue SL mind. 0.05% höher ist (verhindert Spam)
             if (targetSL !== null && targetSL > -pos.dynamicSLPct + 0.05) {
                 pos.dynamicSLPct = -targetSL;
                 broadcastLog(`🚀 <span class="text-emerald-400 font-bold">TRAILING STOP:</span> SL auf +${targetSL.toFixed(2)}% nachgezogen.`);
@@ -180,8 +195,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             timeoutTriggered = true;
         }
 
-        // EXIT CONDITION: Wir schließen NUR noch, wenn der Trailing SL getroffen wird oder Timeout!
-        // Der harte "Take-Profit" ist entfernt. Der Trade läuft endlos nach oben weiter, bis er dreht!
         if (priceChangePct <= -pos.dynamicSLPct || timeoutTriggered) {
             globalState.inPosition = false;
             globalState.position = null;
@@ -213,7 +226,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
             broadcastState();
         }
     } 
-    // 2. NEUE POSITION ERÖFFNEN
+    // 2. NEUE POSITION ERÖFFNEN MIT 5-MINUTEN TREND-FILTER
     else if (!globalState.inPosition && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
         const sessionInfo = getSessionMultiplier();
         const currentCvd = cvdEuro[symbol] || 0;
@@ -223,8 +236,11 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
 
         const isValidLong = posType === 'LONG' && isBreakoutLong;
         const isValidShort = posType === 'SHORT' && isBreakoutShort;
+        
+        // Prüfe zusätzlich den 5-Minuten Trend
+        const isTrendAligned = check5MinTrend(symbol, price, posType, currentProfile);
 
-        if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort)) {
+        if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort) && isTrendAligned) {
             globalState.inPosition = true;
             globalState.position = {
                 symbol: symbol,
@@ -232,7 +248,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
                 buyPrice: price,
                 buyTime: Date.now(),
                 peakProfitPct: 0,
-                dynamicSLPct: globalState.sl, // Startet mit dem roten, negativen SL aus dem Profil
+                dynamicSLPct: globalState.sl,
                 breakEvenTriggered: false
             };
             const icon = posType === 'LONG' ? '📈' : '📉';
