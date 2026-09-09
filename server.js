@@ -48,10 +48,6 @@ const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: 
 let lastSpikeTime = Date.now();
 let spikeIntervals = [120000];
 
-// ==========================================
-// TENDENZGEBER: SESSION & MONDPHASEN ENGINES
-// ==========================================
-
 function getSessionMultiplier() {
     const utcHour = new Date().getUTCHours();
     const isLondon = utcHour >= 7 && utcHour < 16;
@@ -91,7 +87,6 @@ function broadcastTick(data) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 24/7 SERVER-SEITIGE TRADING LOGIK
 function processCloudTradingEngine(symbol, price, tradeDelta) {
     prices[symbol] = price;
     cvd[symbol] = Math.round((cvd[symbol] || 0) + tradeDelta * 10) * 0.985;
@@ -125,7 +120,6 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
                 const pos = globalState.position;
                 const isAgainstLong = pos.type === 'LONG' && moveDirectionPct <= -0.80; 
                 const isAgainstShort = pos.type === 'SHORT' && moveDirectionPct >= 0.80; 
-
                 if (isAgainstLong || isAgainstShort) emergencyCloseTriggered = true;
             }
             broadcastState();
@@ -216,7 +210,6 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
     }
 }
 
-// WEBSOCKET HANDLER
 wss.on('connection', (ws) => {
     clients.add(ws);
     ws.send(JSON.stringify({ type: 'STATE_UPDATE', state: globalState }));
@@ -225,9 +218,23 @@ wss.on('connection', (ws) => {
         try {
             const parsed = JSON.parse(message);
             
+            // NEU: Beim Reset bleiben deine Bot-Einstellungen (Start/Stop, Hebel etc.) erhalten!
             if (parsed.type === 'RESET_STATE') {
+                const currentActive = globalState.agentActive;
+                const currentLev = globalState.leverage;
+                const currentMar = globalState.margin;
+                const currentTp = globalState.tp;
+                const currentSl = globalState.sl;
+                
                 globalState = getInitialState();
-                console.log(`[Server] Depot erfolgreich zurückgesetzt.`);
+                
+                globalState.agentActive = currentActive;
+                globalState.leverage = currentLev;
+                globalState.margin = currentMar;
+                globalState.tp = currentTp;
+                globalState.sl = currentSl;
+
+                console.log(`[Server] Depot erfolgreich zurückgesetzt (Einstellungen beibehalten).`);
                 broadcastState();
                 return;
             }
@@ -242,7 +249,6 @@ wss.on('connection', (ws) => {
                 return;
             }
 
-            // NEU: Einzahlungen und Auszahlungen korrekt auf dem Server buchen!
             if (parsed.type === 'TX_UPDATE' && parsed.tx) {
                 globalState.transactions.push(parsed.tx);
                 if (parsed.tx.type === 'DEPOSIT') {
@@ -251,7 +257,7 @@ wss.on('connection', (ws) => {
                     globalState.balance -= parsed.tx.eur;
                 }
                 console.log(`[Server] Manuelle Transaktion erfasst: ${parsed.tx.type} über ${parsed.tx.eur} €`);
-                broadcastState(); // Aktualisiert sofort Handy UND PC
+                broadcastState();
                 return;
             }
         } catch (e) {}
@@ -260,7 +266,6 @@ wss.on('connection', (ws) => {
     ws.on('close', () => clients.delete(ws));
 });
 
-// BINANCE WEBSOCKET STREAM
 function connectBinanceStream() {
     const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade');
 
@@ -284,4 +289,4 @@ function connectBinanceStream() {
 }
 
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Tx-Sync läuft auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Setting-Memory läuft auf Port ${port}`));
