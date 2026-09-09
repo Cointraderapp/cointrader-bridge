@@ -45,6 +45,42 @@ const prices = { BTCEUR: 73000, ETHEUR: 2300, SOLEUR: 96, XRPEUR: 0.58, DOGEEUR:
 const cvd = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
 const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: [] };
 
+let lastSpikeTime = Date.now();
+let spikeIntervals = [120000];
+
+// ==========================================
+// TENDENZGEBER: SESSION & MONDPHASEN ENGINES
+// ==========================================
+
+function getSessionMultiplier() {
+    const utcHour = new Date().getUTCHours();
+    const isLondon = utcHour >= 7 && utcHour < 16;
+    const isNY = utcHour >= 12 && utcHour < 21;
+
+    if (isLondon && isNY) {
+        return { name: "LONDON+NY OVERLAP 🔥", multiplier: 0.75 };
+    } else if (isLondon || isNY) {
+        return { name: "MAIN SESSION 📈", multiplier: 1.0 };
+    } else {
+        return { name: "OFF-HOURS / ASIEN 🌙", multiplier: 1.4 };
+    }
+}
+
+function getLunarBias() {
+    const date = new Date();
+    let year = date.getUTCFullYear(), month = date.getUTCMonth() + 1, day = date.getUTCDate();
+    if (month < 3) { year--; month += 12; }
+    let a = Math.floor(year / 100), b = Math.floor(a / 4), c = 2 - a + b;
+    let e = Math.floor(365.25 * (year + 4716)), f = Math.floor(30.6001 * (month + 1));
+    let jd = c + day + e + f - 1524.5;
+    let daysSinceNew = (jd - 2451549.5) % 29.53058867;
+    if (daysSinceNew < 0) daysSinceNew += 29.53058867;
+
+    if (daysSinceNew < 5.53) return { name: "Neumond 🌑", favoredType: "LONG" };
+    if (daysSinceNew >= 12.91 && daysSinceNew < 20.30) return { name: "Vollmond 🌕", favoredType: "SHORT" };
+    return { name: "Mond Neutral 🌓", favoredType: "NONE" };
+}
+
 function broadcastState() {
     const payload = JSON.stringify({ type: 'STATE_UPDATE', state: globalState });
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
@@ -67,11 +103,19 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
 
     let emergencyCloseTriggered = false;
 
-    // CIRCUIT BREAKER LOGIK
     if (priceHistory[symbol].length >= 5) {
         const firstPrice = priceHistory[symbol][0];
         const moveDirectionPct = ((price - firstPrice) / firstPrice) * 100; 
         const moveAbsPct = Math.abs(moveDirectionPct);
+
+        if (moveAbsPct >= 0.20) {
+            const timeSinceLastSpike = now - lastSpikeTime;
+            if (timeSinceLastSpike > 15000) {
+                spikeIntervals.push(timeSinceLastSpike);
+                if (spikeIntervals.length > 5) spikeIntervals.shift();
+                lastSpikeTime = now;
+            }
+        }
 
         if (moveAbsPct >= 0.80) {
             globalState.circuitBreakerActive = true;
@@ -95,11 +139,8 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
 
     if (!globalState.agentActive) return;
 
-    // 1. Position überwachen & schließen
     if (globalState.inPosition && globalState.position) {
         const pos = globalState.position;
-
-        // CRITICAL BUGFIX: Nur Ticks verarbeiten, die exakt zum investierten Coin gehören!
         if (symbol !== pos.symbol) return;
 
         let priceChangePct = ((price - pos.buyPrice) / pos.buyPrice) * 100;
@@ -110,7 +151,19 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
         const fee = totalVol * 0.0015;
         const netProfit = grossProfit - fee;
 
-        if (priceChangePct >= globalState.tp || priceChangePct <= -globalState.sl || emergencyCloseTriggered) {
+        const avgSpikeIntervalMs = spikeIntervals.reduce((a, b) => a + b, 0) / spikeIntervals.length;
+        const dynamicTimeoutSec = Math.max(90, Math.round((avgSpikeIntervalMs / 1000) * 1.25)); 
+        
+        const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
+        const currentCvd = cvd[symbol] || 0;
+        const hasMomentum = (pos.type === 'LONG' && currentCvd >= 300) || (pos.type === 'SHORT' && currentCvd <= -300);
+
+        let timeoutTriggered = false;
+        if (!hasMomentum && timeInTradeSec >= dynamicTimeoutSec) {
+            timeoutTriggered = true;
+        }
+
+        if (priceChangePct >= globalState.tp || priceChangePct <= -globalState.sl || emergencyCloseTriggered || timeoutTriggered) {
             globalState.inPosition = false;
             globalState.position = null;
             globalState.totalProfit += netProfit;
@@ -118,7 +171,11 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             globalState.tradesCount++;
             if (netProfit > 0) globalState.winCount++;
 
-            tradeCooldownUntil = now + 15000; // 15 Sekunden Cooldown nach jedem Trade
+            tradeCooldownUntil = now + 15000;
+
+            let exitReason = `☁️ 24/7 Cloud Bot ${symbol} ${pos.type}`;
+            if (emergencyCloseTriggered) exitReason = `🚨 Flash-Crash Guard`;
+            if (timeoutTriggered) exitReason = `⏱️ Dyn. Timeout (${dynamicTimeoutSec}s)`;
 
             const newTx = {
                 id: Date.now(),
@@ -126,19 +183,26 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
                 eur: Math.abs(netProfit),
                 timestamp: Date.now(),
                 entryPrice: price,
-                note: `☁️ 24/7 Cloud Bot ${symbol} ${pos.type} (${netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} € Netto)`
+                note: `${exitReason} (${netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} € Netto)`
             };
             globalState.transactions.push(newTx);
-            console.log(`[Cloud Engine] Trade beendet: ${netProfit.toFixed(2)} € auf ${symbol}`);
+            console.log(`[Cloud Engine] Trade beendet: ${netProfit.toFixed(2)} € | Grund: ${exitReason}`);
             broadcastState();
         }
     } 
-    // 2. Neue Position eröffnen
     else if (!globalState.inPosition && !globalState.circuitBreakerActive && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
         const currentCvd = cvd[symbol] || 0;
+        const sessionInfo = getSessionMultiplier();
+        const lunarInfo = getLunarBias();
 
-        if (Math.abs(currentCvd) >= 1500) {
-            const posType = currentCvd > 0 ? 'LONG' : 'SHORT';
+        let requiredCvd = 1500 * sessionInfo.multiplier;
+        let posType = currentCvd > 0 ? 'LONG' : 'SHORT';
+
+        if (posType === lunarInfo.favoredType) {
+            requiredCvd *= 0.80;
+        }
+
+        if (Math.abs(currentCvd) >= requiredCvd) {
             globalState.inPosition = true;
             globalState.position = {
                 symbol: symbol,
@@ -146,7 +210,7 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
                 buyPrice: price,
                 buyTime: Date.now()
             };
-            console.log(`[Cloud Engine] Neue Position eröffnet: ${posType} auf ${symbol} @ ${price} €`);
+            console.log(`[Cloud Engine] ${posType} auf ${symbol} @ ${price}€ | Session: ${sessionInfo.name} | Mond: ${lunarInfo.name}`);
             broadcastState();
         }
     }
@@ -161,7 +225,6 @@ wss.on('connection', (ws) => {
         try {
             const parsed = JSON.parse(message);
             
-            // SYNCHRONER RESET-BEFEHL
             if (parsed.type === 'RESET_STATE') {
                 globalState = getInitialState();
                 console.log(`[Server] Depot erfolgreich zurückgesetzt.`);
@@ -176,6 +239,20 @@ wss.on('connection', (ws) => {
                 if (parsed.data.sl !== undefined) globalState.sl = parsed.data.sl;
                 if (parsed.data.agentActive !== undefined) globalState.agentActive = parsed.data.agentActive;
                 broadcastState();
+                return;
+            }
+
+            // NEU: Einzahlungen und Auszahlungen korrekt auf dem Server buchen!
+            if (parsed.type === 'TX_UPDATE' && parsed.tx) {
+                globalState.transactions.push(parsed.tx);
+                if (parsed.tx.type === 'DEPOSIT') {
+                    globalState.balance += parsed.tx.eur;
+                } else if (parsed.tx.type === 'WITHDRAW') {
+                    globalState.balance -= parsed.tx.eur;
+                }
+                console.log(`[Server] Manuelle Transaktion erfasst: ${parsed.tx.type} über ${parsed.tx.eur} €`);
+                broadcastState(); // Aktualisiert sofort Handy UND PC
+                return;
             }
         } catch (e) {}
     });
@@ -207,4 +284,4 @@ function connectBinanceStream() {
 }
 
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Symbol-Sperre läuft auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Tx-Sync läuft auf Port ${port}`));
