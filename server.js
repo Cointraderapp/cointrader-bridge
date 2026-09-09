@@ -5,7 +5,7 @@ const WebSocket = require('ws');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine mit Log-Historie'));
+app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine mit Chop-Filter Aktiv'));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -25,7 +25,7 @@ function getInitialState() {
         winCount: 0,
         inPosition: false,
         position: null,
-        logs: [], // Server-Speicher für Terminal-Historie
+        logs: [],
         transactions: [{
             id: Date.now(),
             type: 'DEPOSIT',
@@ -43,7 +43,7 @@ let globalState = getInitialState();
 let tradeCooldownUntil = 0;
 
 const prices = { BTCEUR: 73000, ETHEUR: 2300, SOLEUR: 96, XRPEUR: 0.58, DOGEEUR: 0.12 };
-const cvd = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
+const cvdEuro = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 }; // Messung in Euro
 const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: [] };
 
 let lastSpikeTime = Date.now();
@@ -93,23 +93,28 @@ function broadcastLog(message) {
     const logItem = { time: timeStr, message: message };
     if (!globalState.logs) globalState.logs = [];
     globalState.logs.unshift(logItem);
-    if (globalState.logs.length > 50) globalState.logs.pop(); // Max 50 Logs aufheben
+    if (globalState.logs.length > 50) globalState.logs.pop();
 
     const payload = JSON.stringify({ type: 'LOG_EVENT', log: logItem });
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-function processCloudTradingEngine(symbol, price, tradeDelta) {
+// 24/7 SERVER-SEITIGE TRADING LOGIK MIT CHOP-FILTER
+function processCloudTradingEngine(symbol, price, euroVolumeDelta) {
     prices[symbol] = price;
-    cvd[symbol] = Math.round((cvd[symbol] || 0) + tradeDelta * 10) * 0.985;
+    
+    // Akkumuliere CVD basierend auf Euro-Wert anstelle roher Stückzahl
+    cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
+    
     const now = Date.now();
 
     if (!priceHistory[symbol]) priceHistory[symbol] = [];
     priceHistory[symbol].push(price);
-    if (priceHistory[symbol].length > 10) priceHistory[symbol].shift();
+    if (priceHistory[symbol].length > 12) priceHistory[symbol].shift();
 
     let emergencyCloseTriggered = false;
 
+    // 1. CIRCUIT BREAKER LOGIK (Extreme Spikes)
     if (priceHistory[symbol].length >= 5) {
         const firstPrice = priceHistory[symbol][0];
         const moveDirectionPct = ((price - firstPrice) / firstPrice) * 100; 
@@ -147,6 +152,20 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
 
     if (!globalState.agentActive) return;
 
+    // 2. CHOP & VOLATILITÄTS-FILTER (Verhindert Trades in Flachland-Phasen)
+    let isChopMarket = false;
+    if (priceHistory[symbol].length >= 10) {
+        const maxP = Math.max(...priceHistory[symbol]);
+        const minP = Math.min(...priceHistory[symbol]);
+        const rangePct = ((maxP - minP) / price) * 100;
+        
+        // Wenn Kursschwankung der letzten Ticks unter 0.15% liegt -> TOTER MARKT / SQUEEZE
+        if (rangePct < 0.15) {
+            isChopMarket = true;
+        }
+    }
+
+    // 3. POSITION ÜBERWACHEN & SCHLIESSEN
     if (globalState.inPosition && globalState.position) {
         const pos = globalState.position;
         if (symbol !== pos.symbol) return;
@@ -163,8 +182,8 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
         const dynamicTimeoutSec = Math.max(90, Math.round((avgSpikeIntervalMs / 1000) * 1.25)); 
         
         const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
-        const currentCvd = cvd[symbol] || 0;
-        const hasMomentum = (pos.type === 'LONG' && currentCvd >= 300) || (pos.type === 'SHORT' && currentCvd <= -300);
+        const currentCvd = cvdEuro[symbol] || 0;
+        const hasMomentum = (pos.type === 'LONG' && currentCvd >= 25000) || (pos.type === 'SHORT' && currentCvd <= -25000);
 
         let timeoutTriggered = false;
         if (!hasMomentum && timeInTradeSec >= dynamicTimeoutSec) {
@@ -179,7 +198,7 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             globalState.tradesCount++;
             if (netProfit > 0) globalState.winCount++;
 
-            tradeCooldownUntil = now + 15000;
+            tradeCooldownUntil = now + 20000; // 20 Sekunden Pause nach jedem Trade
 
             let exitReason = `☁️ 24/7 Cloud Bot ${symbol} ${pos.type}`;
             if (emergencyCloseTriggered) exitReason = `🚨 Flash-Crash Guard`;
@@ -202,19 +221,21 @@ function processCloudTradingEngine(symbol, price, tradeDelta) {
             broadcastState();
         }
     } 
-    else if (!globalState.inPosition && !globalState.circuitBreakerActive && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
-        const currentCvd = cvd[symbol] || 0;
+    // 4. NEUE POSITION ERÖFFNEN (NUR BEI ECHTER VOLATILITÄT & HOHEM EURO-CVD)
+    else if (!globalState.inPosition && !globalState.circuitBreakerActive && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= globalState.margin) {
+        const currentCvd = cvdEuro[symbol] || 0;
         const sessionInfo = getSessionMultiplier();
         const lunarInfo = getLunarBias();
 
-        let requiredCvd = 1500 * sessionInfo.multiplier;
+        // Mindest-Euro-Volumen-Delta (z. B. 40.000 € kumulierter Netto-Kaufdruck)
+        let requiredEuroCvd = 40000 * sessionInfo.multiplier;
         let posType = currentCvd > 0 ? 'LONG' : 'SHORT';
 
         if (posType === lunarInfo.favoredType) {
-            requiredCvd *= 0.80;
+            requiredEuroCvd *= 0.80;
         }
 
-        if (Math.abs(currentCvd) >= requiredCvd) {
+        if (Math.abs(currentCvd) >= requiredEuroCvd) {
             globalState.inPosition = true;
             globalState.position = {
                 symbol: symbol,
@@ -296,9 +317,13 @@ function connectBinanceStream() {
             const symbol = symbolMap[tick.s];
             if (symbol) {
                 const price = parseFloat(tick.p) * 0.92;
-                const delta = tick.m ? -parseFloat(tick.q) : parseFloat(tick.q);
+                const quantity = parseFloat(tick.q);
                 
-                processCloudTradingEngine(symbol, price, delta);
+                // BERECHNE EURO-VOLUMEN-DELTA (Preis * Stückzahl)
+                const euroVolume = quantity * price;
+                const euroDelta = tick.m ? -euroVolume : euroVolume;
+                
+                processCloudTradingEngine(symbol, price, euroDelta);
                 broadcastTick(tick);
             }
         } catch (e) {}
@@ -309,4 +334,4 @@ function connectBinanceStream() {
 }
 
 connectBinanceStream();
-server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Log-Historie läuft auf Port ${port}`));
+server.listen(port, () => console.log(`[Server] 24/7 Cloud Bridge mit Chop-Sperre läuft auf Port ${port}`));
