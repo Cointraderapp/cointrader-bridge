@@ -394,7 +394,7 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 5. TRADING ENGINE KERN WITH MAE/MFE ANALYTICS & DYNAMIC KELLY MARGIN
+// 5. TRADING ENGINE KERN WITH PARABOLIC TRAILING & BLOW-OFF TOP LOCK
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
@@ -439,6 +439,9 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             pos.mae = priceChangePct;
         }
 
+        const currentCvd = cvdEuro[symbol] || 0;
+
+        // Break-Even Trigger
         if (pos.peakProfitPct >= 0.25 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.15;
@@ -446,22 +449,34 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             broadcastState();
         }
 
+        // DYNAMISCHES PARABOLISCHES TRAILING & BLOW-OFF TOP LOCK
         if (pos.breakEvenTriggered) {
-            let targetSL = null;
-            if (priceChangePct >= currentProfile.tp) {
-                targetSL = priceChangePct - 0.15;
-            } else if (priceChangePct >= 0.40) {
-                targetSL = priceChangePct - 0.20;
+            let trailingDistance = 0.15; // Standard-Abstand
+
+            // 1. Parabolischer Ausbruch: Abstand aufweiten für Raum bei Mega-Pumps
+            if (priceChangePct >= 2.00) {
+                trailingDistance = 0.45; // Viel Atemraum bei vertikalen Rallies
+            } else if (priceChangePct >= 1.00) {
+                trailingDistance = 0.30;
+            } else if (priceChangePct >= 0.50) {
+                trailingDistance = 0.20;
             }
 
-            if (targetSL !== null && targetSL > -pos.dynamicSLPct + 0.05) {
+            // 2. Blow-Off Top Schutz: CVD-Volumen fällt am Peak ab -> Blitzschnell sichern!
+            const isCvdReversing = (pos.type === 'LONG' && currentCvd < 0) || (pos.type === 'SHORT' && currentCvd > 0);
+            if (priceChangePct >= 0.70 && isCvdReversing) {
+                trailingDistance = 0.08; // Enge Notbremse am Hochpunkt
+            }
+
+            let targetSL = priceChangePct - trailingDistance;
+
+            if (targetSL > -pos.dynamicSLPct + 0.03) {
                 pos.dynamicSLPct = -targetSL;
-                broadcastLog(`🚀 <span class="text-emerald-400 font-bold">TRAILING STOP:</span> SL auf +${targetSL.toFixed(2)}% nachgezogen.`);
+                broadcastLog(`🚀 <span class="text-emerald-400 font-bold">PARABOLIC TRAILING:</span> Peak +${priceChangePct.toFixed(2)}% | SL auf +${targetSL.toFixed(2)}% gesichert (Abstand: ${trailingDistance.toFixed(2)}%)`);
                 broadcastState();
             }
         }
 
-        const currentCvd = cvdEuro[symbol] || 0;
         const isCvdFavorable = (pos.type === 'LONG' && currentCvd >= -8000) || (pos.type === 'SHORT' && currentCvd <= 8000);
         const isTrendStillValid = check5MinTrend(symbol, price, pos.type, currentProfile);
 
