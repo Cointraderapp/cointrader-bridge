@@ -110,9 +110,11 @@ function calculateKellyMargin() {
 
     let kellyFraction = (p * b - (1 - p)) / b;
 
+    // Maximale Zuteilungsquote steigt mit der Confidence (von 2.5% bis zu max 25%)
     let dynamicMaxFraction = Math.max(0.025, (aiState.confidence / 100) * 0.25);
     let targetFraction = Math.max(0.025, Math.min(dynamicMaxFraction, kellyFraction));
 
+    // Bei extrem sicheren Setups (Confidence >= 80% & Win-Streak) Vollausschöpfung bis 25%
     if (aiState.confidence >= 80 && aiState.consecutiveWins >= 1) {
         targetFraction = Math.min(0.25, targetFraction * 1.4);
     }
