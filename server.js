@@ -52,19 +52,16 @@ let aiState = {
 
 // GANZHENTLICHE MAKRO- & TELEMETRIE PROGNOSE-BERECHNUNG
 function calculateHolisticPrognosisScore() {
-    let score = 50; // Neutrale Basis
+    let score = 50;
 
-    // Makro-Einflüsse
-    if (macroMatrixState.dxyChangePct < 0) score += 10;       // DXY fällt = Bullish für Krypto
-    if (macroMatrixState.nasdaq100ChangePct > 0) score += 15; // Tech-Aktien steigen = Bullish
-    if (macroMatrixState.sp500ChangePct > 0) score += 10;     // S&P 500 steigt = Bullish
-    if (macroMatrixState.goldChangePct > 0) score += 5;       // Gold positiv = Hedging OK
+    if (macroMatrixState.dxyChangePct < 0) score += 10;
+    if (macroMatrixState.nasdaq100ChangePct > 0) score += 15;
+    if (macroMatrixState.sp500ChangePct > 0) score += 10;
+    if (macroMatrixState.goldChangePct > 0) score += 5;
 
-    // Telemetrie-Einflüsse
-    if (telemetryState.ethNetflow < 0) score += 5;             // Akkumulation auf Exchanges
-    if (telemetryState.orderbookImbalancePct > 0) score += 5;  // Mehr Bids als Asks im Buch
+    if (telemetryState.ethNetflow < 0) score += 5;
+    if (telemetryState.orderbookImbalancePct > 0) score += 5;
 
-    // KI-Vertrauensfaktor (+/- 15%)
     let aiFactor = (aiState.confidence - 50) * 0.3;
     score += aiFactor;
 
@@ -94,39 +91,40 @@ function saveAiMemory() {
     }
 }
 
+// BALANCIERTE FEEDBACK-LOOP LERNFUNKTION FÜR SCHNELLERES LERNEN
 function trainAgentAfterTrade(netProfit) {
     if (netProfit > 0) {
         aiState.consecutiveWins++;
         aiState.consecutiveLosses = 0;
-        aiState.confidence = Math.min(100, aiState.confidence + 5);
-        aiState.marketAggressiveness = Math.max(0.5, aiState.marketAggressiveness - 0.1);
-        broadcastLog(`🧠 <span class="text-emerald-400 font-bold">KI-BELOHNUNG (+5%):</span> Win-Streak ${aiState.consecutiveWins}x | Confidence: ${aiState.confidence}%`);
+        aiState.confidence = Math.min(100, aiState.confidence + 6); // +6% nach Gewinn
+        aiState.marketAggressiveness = Math.max(0.6, aiState.marketAggressiveness - 0.1);
+        broadcastLog(`🧠 <span class="text-emerald-400 font-bold">KI-BELOHNUNG (+6%):</span> Win-Streak ${aiState.consecutiveWins}x | Confidence: ${aiState.confidence}%`);
     } else {
         aiState.consecutiveLosses++;
         aiState.consecutiveWins = 0;
-        aiState.confidence = Math.max(0, aiState.confidence - 15);
-        aiState.marketAggressiveness = Math.min(3.0, aiState.marketAggressiveness + 0.5);
-        broadcastLog(`🚨 <span class="text-rose-400 font-bold">KI-BESTRAFUNG (-15%):</span> Defensive Haltung aktiviert | Confidence: ${aiState.confidence}%`);
+        aiState.confidence = Math.max(15, aiState.confidence - 8); // Abgemilderte Strafe (-8% statt -15%)
+        aiState.marketAggressiveness = Math.min(1.8, aiState.marketAggressiveness + 0.25); // Hürden-Deckel max 1.8x
+        broadcastLog(`🚨 <span class="text-rose-400 font-bold">KI-BESTRAFUNG (-8%):</span> Korrektur-Modus | Confidence: ${aiState.confidence}%`);
     }
     saveAiMemory();
 }
 
 function generateDynamicAiProfile() {
     let dynamicLeverage = Math.max(5, Math.floor((aiState.confidence / 100) * 50));
-    let baseCvd = 60000; 
+    let baseCvd = 35000; // Reduzierte Grundschwelle für höhere Signalfrequenz
     let dynamicCvd = Math.round(baseCvd * aiState.marketAggressiveness);
 
     return {
         id: 'AUTO_KI',
         name: `Quantum-KI (${aiState.confidence}% Conf)`,
         cvdThreshold: dynamicCvd,
-        minRangePct: 0.15,
+        minRangePct: 0.10,
         leverage: dynamicLeverage,
         margin: 2000,
         tp: parseFloat((0.50 + (aiState.confidence / 100) * 0.30).toFixed(2)),
         sl: parseFloat((0.80 - (aiState.confidence / 100) * 0.40).toFixed(2)),
-        timeoutSec: 90,
-        cooldownSec: Math.round(15 * aiState.marketAggressiveness),
+        timeoutSec: 75,
+        cooldownSec: Math.round(10 * aiState.marketAggressiveness),
         use5MinTrend: true,
         isDynamic: true
     };
@@ -192,49 +190,38 @@ const vwapData = {
     DOGEEUR: { sumVP: 0, sumVol: 0 }
 };
 
+// OPTIMIERTER TELEMETRIE-GATEKEEPER (TOLERANTER FÜR ANFÄNGLICHES LERNEN)
 function evaluateStrictTelemetryGates(symbol, posType) {
-    if (telemetryState.mempoolGwei > 75) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Mempool Gas zu hoch (${telemetryState.mempoolGwei} Gwei). Trade storniert.`);
+    if (telemetryState.mempoolGwei > 85) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Mempool Gas zu hoch (${telemetryState.mempoolGwei} Gwei).`);
         return false;
     }
-    if (posType === 'LONG' && telemetryState.ethNetflow > 500) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Inflow-Spike auf Börsen (+${telemetryState.ethNetflow} ETH). Longs blockiert.`);
+    if (posType === 'LONG' && telemetryState.ethNetflow > 1200) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Inflow-Spike (+${telemetryState.ethNetflow} ETH).`);
         return false;
     }
-    if (posType === 'SHORT' && telemetryState.ethNetflow < -2000) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Akkumulation (-${Math.abs(telemetryState.ethNetflow)} ETH). Shorts blockiert.`);
+    if (posType === 'SHORT' && telemetryState.ethNetflow < -3000) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Akkumulation (-${Math.abs(telemetryState.ethNetflow)} ETH).`);
         return false;
     }
-    if (posType === 'LONG' && telemetryState.orderbookImbalancePct < 2.0) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Zu wenig Kaufdruck im Buch (${telemetryState.orderbookImbalancePct}% Bids).`);
+    if (posType === 'LONG' && telemetryState.orderbookImbalancePct < -12.0) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Asks-Übermacht im Buch (${telemetryState.orderbookImbalancePct}%).`);
         return false;
     }
-    if (posType === 'SHORT' && telemetryState.orderbookImbalancePct > -2.0) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Zu wenig Verkaufsdruck im Buch (${telemetryState.orderbookImbalancePct}% Asks).`);
+    if (posType === 'SHORT' && telemetryState.orderbookImbalancePct > 12.0) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Bids-Übermacht im Buch (${telemetryState.orderbookImbalancePct}%).`);
         return false;
     }
-    if (posType === 'LONG' && telemetryState.fearAndGreed > 78) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Gier (${telemetryState.fearAndGreed}). Top-Kauf-Schutz aktiv.`);
+    if (posType === 'LONG' && telemetryState.fearAndGreed > 85) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Gier (${telemetryState.fearAndGreed}). Top-Schutz.`);
         return false;
     }
-    if (posType === 'SHORT' && telemetryState.fearAndGreed < 22) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Angst (${telemetryState.fearAndGreed}). Boden-Verkauf-Schutz aktiv.`);
+    if (posType === 'SHORT' && telemetryState.fearAndGreed < 15) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Angst (${telemetryState.fearAndGreed}). Boden-Schutz.`);
         return false;
     }
-    if (telemetryState.openInterestChangePct > 4.5) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> OI-Hebelüberhitzung (+${telemetryState.openInterestChangePct}%). Squeeze-Gefahr.`);
-        return false;
-    }
-    if (telemetryState.solarGeomagneticKp >= 6.0) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Geomagnetischer Sturm (Kp ${telemetryState.solarGeomagneticKp}). System im Safe-Mode.`);
-        return false;
-    }
-    if (posType === 'LONG' && macroMatrixState.dxyChangePct > 0.35) {
-        broadcastLog(`🌐 <span class="text-rose-400 font-bold">MAKRO-BLOCK (${symbol}):</span> DXY steigt stark (+${macroMatrixState.dxyChangePct}%). Krypto-Longs geblockt.`);
-        return false;
-    }
-    if (posType === 'LONG' && macroMatrixState.nasdaq100ChangePct < -0.60) {
-        broadcastLog(`🌐 <span class="text-rose-400 font-bold">MAKRO-BLOCK (${symbol}):</span> US-Tech-Aktien brechen ein (${macroMatrixState.nasdaq100ChangePct}% NASDAQ). Long geblockt.`);
+    if (telemetryState.solarGeomagneticKp >= 6.5) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Solarer Sturm (Kp ${telemetryState.solarGeomagneticKp}).`);
         return false;
     }
     return true;
@@ -283,7 +270,7 @@ function getSessionMultiplier() {
 
     if (isLondon && isNY) return { name: "LONDON+NY OVERLAP 🔥", multiplier: 0.85 };
     if (isLondon || isNY) return { name: "MAIN SESSION 📈", multiplier: 1.0 };
-    return { name: "OFF-HOURS / ASIEN 🌙", multiplier: 1.3 };
+    return { name: "OFF-HOURS / ASIEN 🌙", multiplier: 1.2 };
 }
 
 function broadcastState() {
@@ -424,7 +411,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 trainAgentAfterTrade(netProfit);
             }
 
-            tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000 * (consecutiveLosses >= 2 ? 2 : 1));
+            tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000 * (consecutiveLosses >= 2 ? 1.5 : 1));
 
             let exitReason = `🤖 ${currentProfile.name} ${symbol} ${pos.type}`;
             if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${currentProfile.timeoutSec}s)`;
@@ -460,7 +447,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         }
 
         if (consecutiveLosses >= 2) {
-            requiredEuroCvd *= 1.80;
+            requiredEuroCvd *= 1.40;
         }
 
         let posType = currentCvd > 0 ? 'LONG' : 'SHORT';
