@@ -22,16 +22,18 @@ const PROFILES = {
     RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 15000, minRangePct: 0.10, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10, use5MinTrend: false }
 };
 
-// 2. LIVE TELEMETRIE & MAKRO MATRIX STATE
+// 2. LIVE TELEMETRIE, SQUEEZE & MAKRO MATRIX STATE
 let telemetryState = {
     mempoolGwei: 32,
-    ethNetflow: -1814,          // Negative ETH = Akkumulation (Bullish)
-    orderbookImbalancePct: 14.92, // Positive = Bids > Asks
-    fearAndGreed: 28,           // < 20 Extreme Fear, > 80 Extreme Greed
+    ethNetflow: -1814,
+    orderbookImbalancePct: 14.92,
+    fearAndGreed: 28,
     openInterestChangePct: 2.1,
     socialVelocitySpike: 1.3,
-    solarGeomagneticKp: 2.8,    // > 6.0 = Extreme Storm
-    tideGravitationalVector: 0.82
+    solarGeomagneticKp: 2.8,
+    tideGravitationalVector: 0.82,
+    fundingRatePct: 0.015,         // Squeeze-Radar
+    simulatedSpreadPct: 0.012      // Spread-Expansion Guard
 };
 
 let macroMatrixState = {
@@ -42,15 +44,16 @@ let macroMatrixState = {
     goldChangePct: 0.15
 };
 
-// 3. KI-GEDÄCHTNIS & PERSISTENZ-SPEICHER
+// 3. KI-GEDÄCHTNIS (REINFORCEMENT LEARNING & MAE/MFE ANALYTICS)
 let aiState = {
     confidence: 50,
     consecutiveLosses: 0,
     consecutiveWins: 0,
-    marketAggressiveness: 1.0
+    marketAggressiveness: 1.0,
+    maeHistory: [],                // Maximum Adverse Excursion Historie
+    avgWinMae: 0.42                // Durschnittlicher Maximalrücksetzer erfolgreicher Trades
 };
 
-// GANZHENTLICHE MAKRO- & TELEMETRIE PROGNOSE-BERECHNUNG
 function calculateHolisticPrognosisScore() {
     let score = 50;
 
@@ -74,8 +77,8 @@ function loadAiMemory() {
             const data = fs.readFileSync(AI_MEMORY_FILE, 'utf8');
             const savedState = JSON.parse(data);
             if (savedState.aiState) {
-                aiState = savedState.aiState;
-                console.log(`[KI-Gedächtnis] Erfolgreich geladen. Confidence: ${aiState.confidence}%`);
+                aiState = Object.assign(aiState, savedState.aiState);
+                console.log(`[KI-Gedächtnis] Geladen. Conf: ${aiState.confidence}%, MAE-Avg: ${aiState.avgWinMae}%`);
             }
         }
     } catch (e) {
@@ -91,28 +94,67 @@ function saveAiMemory() {
     }
 }
 
-// BALANCIERTE FEEDBACK-LOOP LERNFUNKTION FÜR SCHNELLERES LERNEN
-function trainAgentAfterTrade(netProfit) {
+// INSTITUTIONELLES KELLY-KRITERIUM FÜR DYNAMISCHE POSITIONSGRÖSSEN (BIS ZU 25% DER EINLAGEN)
+function calculateKellyMargin() {
+    const currentBalance = globalState.balance || 20000;
+    
+    // Obergrenze = exakt 25% des aktuellen Depotguthabens
+    const maxAllowedMargin = Math.round(currentBalance * 0.25); 
+
+    let p = globalState.tradesCount >= 3 ? (globalState.winCount / globalState.tradesCount) : 0.60;
+    p = Math.max(0.25, Math.min(0.90, p));
+
+    const tpRatio = (aiState.confidence / 100) * 0.30 + 0.50;
+    const slRatio = Math.max(0.2, aiState.avgWinMae * 1.2);
+    const b = tpRatio / slRatio; // Risk/Reward Ratio
+
+    let kellyFraction = (p * b - (1 - p)) / b;
+
+    // Maximale Zuteilungsquote steigt mit der Confidence (von 2.5% bis zu max 25%)
+    let dynamicMaxFraction = Math.max(0.025, (aiState.confidence / 100) * 0.25);
+    let targetFraction = Math.max(0.025, Math.min(dynamicMaxFraction, kellyFraction));
+
+    // Bei extrem sicheren Setups (Confidence >= 80% & Win-Streak) Vollausschöpfung bis 25%
+    if (aiState.confidence >= 80 && aiState.consecutiveWins >= 1) {
+        targetFraction = Math.min(0.25, targetFraction * 1.4);
+    }
+
+    const calculatedMargin = Math.round(currentBalance * targetFraction);
+    return Math.max(500, Math.min(maxAllowedMargin, calculatedMargin));
+}
+
+function trainAgentAfterTrade(netProfit, tradeMae) {
     if (netProfit > 0) {
         aiState.consecutiveWins++;
         aiState.consecutiveLosses = 0;
-        aiState.confidence = Math.min(100, aiState.confidence + 6); // +6% nach Gewinn
+        aiState.confidence = Math.min(100, aiState.confidence + 6);
         aiState.marketAggressiveness = Math.max(0.6, aiState.marketAggressiveness - 0.1);
-        broadcastLog(`🧠 <span class="text-emerald-400 font-bold">KI-BELOHNUNG (+6%):</span> Win-Streak ${aiState.consecutiveWins}x | Confidence: ${aiState.confidence}%`);
+        
+        if (tradeMae !== undefined && tradeMae < 0) {
+            const winMae = Math.abs(tradeMae);
+            aiState.maeHistory.push(winMae);
+            if (aiState.maeHistory.length > 25) aiState.maeHistory.shift();
+            aiState.avgWinMae = parseFloat((aiState.maeHistory.reduce((a, b) => a + b, 0) / aiState.maeHistory.length).toFixed(2));
+        }
+
+        broadcastLog(`🧠 <span class="text-emerald-400 font-bold">KI-BELOHNUNG (+6%):</span> Win-Streak ${aiState.consecutiveWins}x | Conf: ${aiState.confidence}% | MAE-Avg: ${aiState.avgWinMae}%`);
     } else {
         aiState.consecutiveLosses++;
         aiState.consecutiveWins = 0;
-        aiState.confidence = Math.max(15, aiState.confidence - 8); // Abgemilderte Strafe (-8% statt -15%)
-        aiState.marketAggressiveness = Math.min(1.8, aiState.marketAggressiveness + 0.25); // Hürden-Deckel max 1.8x
-        broadcastLog(`🚨 <span class="text-rose-400 font-bold">KI-BESTRAFUNG (-8%):</span> Korrektur-Modus | Confidence: ${aiState.confidence}%`);
+        aiState.confidence = Math.max(15, aiState.confidence - 8);
+        aiState.marketAggressiveness = Math.min(1.8, aiState.marketAggressiveness + 0.25);
+        broadcastLog(`🚨 <span class="text-rose-400 font-bold">KI-BESTRAFUNG (-8%):</span> Korrektur-Modus | Conf: ${aiState.confidence}%`);
     }
     saveAiMemory();
 }
 
 function generateDynamicAiProfile() {
     let dynamicLeverage = Math.max(5, Math.floor((aiState.confidence / 100) * 50));
-    let baseCvd = 35000; // Reduzierte Grundschwelle für höhere Signalfrequenz
+    let baseCvd = 35000;
     let dynamicCvd = Math.round(baseCvd * aiState.marketAggressiveness);
+    let kellyMargin = calculateKellyMargin();
+
+    let adaptiveSl = Math.max(0.35, Math.min(1.10, aiState.avgWinMae * 1.25));
 
     return {
         id: 'AUTO_KI',
@@ -120,10 +162,10 @@ function generateDynamicAiProfile() {
         cvdThreshold: dynamicCvd,
         minRangePct: 0.10,
         leverage: dynamicLeverage,
-        margin: 2000,
+        margin: kellyMargin,
         tp: parseFloat((0.50 + (aiState.confidence / 100) * 0.30).toFixed(2)),
-        sl: parseFloat((0.80 - (aiState.confidence / 100) * 0.40).toFixed(2)),
-        timeoutSec: 75,
+        sl: parseFloat(adaptiveSl.toFixed(2)),
+        timeoutSec: 90,
         cooldownSec: Math.round(10 * aiState.marketAggressiveness),
         use5MinTrend: true,
         isDynamic: true
@@ -190,8 +232,54 @@ const vwapData = {
     DOGEEUR: { sumVP: 0, sumVol: 0 }
 };
 
-// OPTIMIERTER TELEMETRIE-GATEKEEPER (TOLERANTER FÜR ANFÄNGLICHES LERNEN)
+// 4. INSTITUTIONELLE SCHUTZ-GATEKEEPER & SENSORDETEKTOREN
+
+function detectIcebergAbsorption(symbol, currentPrice) {
+    const history = priceHistory[symbol];
+    if (!history || history.length < 15) return false;
+
+    const absCvd = Math.abs(cvdEuro[symbol] || 0);
+    const priceRangePct = (Math.abs(currentPrice - history[history.length - 15]) / currentPrice) * 100;
+
+    if (absCvd > 28000 && priceRangePct < 0.025) {
+        broadcastLog(`🧊 <span class="text-cyan-300 font-bold">ICEBERG-RADAR (${symbol}):</span> Limit-Wand absorbiert CVD (${absCvd.toLocaleString('de-DE')} €). Trade blockiert.`);
+        return true;
+    }
+    return false;
+}
+
+function isNewsBlackoutActive() {
+    const now = new Date();
+    const utcMin = now.getUTCMinutes();
+    const utcHour = now.getUTCHours();
+    
+    const isEventHour = [13, 14, 18, 19].includes(utcHour);
+    if (isEventHour && (utcMin >= 27 && utcMin <= 33)) {
+        return true;
+    }
+    return false;
+}
+
 function evaluateStrictTelemetryGates(symbol, posType) {
+    if (isNewsBlackoutActive()) {
+        broadcastLog(`📰 <span class="text-amber-400 font-bold">NEWS-LOCKOUT:</span> Makro-Event Fenster aktiv. Keine Ordereingabe.`);
+        return false;
+    }
+
+    if (detectIcebergAbsorption(symbol, prices[symbol] || 100)) {
+        return false;
+    }
+
+    if (telemetryState.simulatedSpreadPct > 0.045) {
+        broadcastLog(`⚡ <span class="text-rose-400 font-bold">SPREAD GUARD (${symbol}):</span> Liquidität dünn (Spread ${telemetryState.simulatedSpreadPct.toFixed(3)}%). Trade abgebrochen.`);
+        return false;
+    }
+
+    if (posType === 'LONG' && telemetryState.fundingRatePct > 0.05) {
+        broadcastLog(`🔥 <span class="text-rose-400 font-bold">SQUEEZE-RADAR (${symbol}):</span> Longs überhitzt (Funding Rate ${telemetryState.fundingRatePct}%). Long geblockt.`);
+        return false;
+    }
+
     if (telemetryState.mempoolGwei > 85) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Mempool Gas zu hoch (${telemetryState.mempoolGwei} Gwei).`);
         return false;
@@ -282,6 +370,7 @@ function broadcastState() {
     if (globalState.profileId === 'AUTO_KI') {
         const dynProf = generateDynamicAiProfile();
         globalState.leverage = dynProf.leverage;
+        globalState.margin = dynProf.margin;
         globalState.tp = dynProf.tp;
         globalState.sl = dynProf.sl;
     }
@@ -305,7 +394,7 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 5. TRADING ENGINE KERN
+// 5. TRADING ENGINE KERN WITH MAE/MFE ANALYTICS & DYNAMIC KELLY MARGIN
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
@@ -346,6 +435,10 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             pos.peakProfitPct = priceChangePct;
         }
 
+        if (priceChangePct < (pos.mae || 0)) {
+            pos.mae = priceChangePct;
+        }
+
         if (pos.peakProfitPct >= 0.25 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.15;
@@ -368,23 +461,40 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             }
         }
 
-        const totalVol = currentProfile.margin * currentProfile.leverage;
-        const grossProfit = totalVol * (priceChangePct / 100);
-        const fee = totalVol * 0.0012;
-        const netProfit = grossProfit - fee;
-
-        const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
         const currentCvd = cvdEuro[symbol] || 0;
-        const hasMomentum = (pos.type === 'LONG' && currentCvd >= 10000) || (pos.type === 'SHORT' && currentCvd <= -10000);
+        const isCvdFavorable = (pos.type === 'LONG' && currentCvd >= -8000) || (pos.type === 'SHORT' && currentCvd <= 8000);
+        const isTrendStillValid = check5MinTrend(symbol, price, pos.type, currentProfile);
 
-        let timeoutTriggered = false;
-        if (!hasMomentum && timeInTradeSec >= currentProfile.timeoutSec) {
-            timeoutTriggered = true;
+        const atrPct = (priceHistory[symbol].length >= 12) 
+            ? ((Math.max(...priceHistory[symbol].slice(-12)) - Math.min(...priceHistory[symbol].slice(-12))) / price) * 100 
+            : 0.4;
+        const isQuietMarket = atrPct < 0.35;
+
+        let effectiveMaxHoldTime = currentProfile.timeoutSec;
+        let effectiveSL = pos.dynamicSLPct;
+
+        if (priceChangePct < 0 && !pos.breakEvenTriggered) {
+            if (isTrendStillValid && isCvdFavorable && isQuietMarket) {
+                effectiveMaxHoldTime = 360;
+                effectiveSL = Math.min(1.30, currentProfile.sl * 1.6);
+            }
         }
 
-        if (priceChangePct <= -pos.dynamicSLPct || timeoutTriggered) {
+        const emergencyHardSL = 1.80;
+        const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
+
+        let stopLossTriggered = (priceChangePct <= -effectiveSL) || (priceChangePct <= -emergencyHardSL);
+        let timeoutTriggered = (timeInTradeSec >= effectiveMaxHoldTime);
+
+        if (stopLossTriggered || timeoutTriggered) {
             globalState.inPosition = false;
             globalState.position = null;
+
+            const totalVol = currentProfile.margin * currentProfile.leverage;
+            const grossProfit = totalVol * (priceChangePct / 100);
+            const fee = totalVol * 0.0012;
+            const netProfit = grossProfit - fee;
+
             globalState.totalProfit += netProfit;
             globalState.balance += netProfit;
             globalState.dailyPnL += netProfit;
@@ -408,13 +518,13 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             }
 
             if (globalState.profileId === 'AUTO_KI') {
-                trainAgentAfterTrade(netProfit);
+                trainAgentAfterTrade(netProfit, pos.mae);
             }
 
             tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000 * (consecutiveLosses >= 2 ? 1.5 : 1));
 
             let exitReason = `🤖 ${currentProfile.name} ${symbol} ${pos.type}`;
-            if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${currentProfile.timeoutSec}s)`;
+            if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${effectiveMaxHoldTime}s)`;
             else if (pos.breakEvenTriggered) exitReason = `🛡️ Trailing/Break-Even Ausstieg`;
 
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
@@ -425,7 +535,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 eur: Math.abs(netProfit),
                 timestamp: Date.now(),
                 entryPrice: price,
-                note: `${exitReason} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto)`
+                note: `${exitReason} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`
             };
             globalState.transactions.push(newTx);
             
@@ -473,12 +583,14 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 buyTime: Date.now(),
                 peakProfitPct: 0,
                 dynamicSLPct: currentProfile.sl,
-                breakEvenTriggered: false
+                breakEvenTriggered: false,
+                mae: 0
             };
             const icon = posType === 'LONG' ? '📈' : '📉';
             const color = posType === 'LONG' ? 'text-emerald-400' : 'text-rose-400';
 
-            broadcastLog(`🤖 ${icon} <span class="${color} font-bold">${currentProfile.name} ORDER (${symbol} ${currentProfile.leverage}x):</span> ${posType} Einsatz ${currentProfile.margin}€ @ ${price.toFixed(4)} €`);
+            const pctOfBalance = ((currentProfile.margin / globalState.balance) * 100).toFixed(1);
+            broadcastLog(`🤖 ${icon} <span class="${color} font-bold">${currentProfile.name} ORDER (${symbol} ${currentProfile.leverage}x):</span> ${posType} Einsatz ${currentProfile.margin}€ (${pctOfBalance}% des Depots) @ ${price.toFixed(4)} €`);
             broadcastState();
         }
     }
@@ -516,7 +628,7 @@ wss.on('connection', (ws) => {
             }
             if (parsed.type === 'PARAM_UPDATE' && parsed.data) {
                 if (parsed.data.leverage !== undefined && globalState.profileId !== 'AUTO_KI') globalState.leverage = parsed.data.leverage;
-                if (parsed.data.margin !== undefined) globalState.margin = parsed.data.margin;
+                if (parsed.data.margin !== undefined && globalState.profileId !== 'AUTO_KI') globalState.margin = parsed.data.margin;
                 if (parsed.data.tp !== undefined && globalState.profileId !== 'AUTO_KI') globalState.tp = parsed.data.tp;
                 if (parsed.data.sl !== undefined && globalState.profileId !== 'AUTO_KI') globalState.sl = parsed.data.sl;
                 if (parsed.data.agentActive !== undefined) globalState.agentActive = parsed.data.agentActive;
