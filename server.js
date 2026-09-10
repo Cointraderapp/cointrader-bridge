@@ -50,6 +50,27 @@ let aiState = {
     marketAggressiveness: 1.0
 };
 
+// GANZHENTLICHE MAKRO- & TELEMETRIE PROGNOSE-BERECHNUNG
+function calculateHolisticPrognosisScore() {
+    let score = 50; // Neutrale Basis
+
+    // Makro-Einflüsse
+    if (macroMatrixState.dxyChangePct < 0) score += 10;       // DXY fällt = Bullish für Krypto
+    if (macroMatrixState.nasdaq100ChangePct > 0) score += 15; // Tech-Aktien steigen = Bullish
+    if (macroMatrixState.sp500ChangePct > 0) score += 10;     // S&P 500 steigt = Bullish
+    if (macroMatrixState.goldChangePct > 0) score += 5;       // Gold positiv = Hedging OK
+
+    // Telemetrie-Einflüsse
+    if (telemetryState.ethNetflow < 0) score += 5;             // Akkumulation auf Exchanges
+    if (telemetryState.orderbookImbalancePct > 0) score += 5;  // Mehr Bids als Asks im Buch
+
+    // KI-Vertrauensfaktor (+/- 15%)
+    let aiFactor = (aiState.confidence - 50) * 0.3;
+    score += aiFactor;
+
+    return Math.min(98, Math.max(2, Math.round(score)));
+}
+
 function loadAiMemory() {
     try {
         if (fs.existsSync(AI_MEMORY_FILE)) {
@@ -141,6 +162,7 @@ function getInitialState() {
         aiState: aiState,
         telemetry: telemetryState,
         macroMatrix: macroMatrixState,
+        prognosisScore: calculateHolisticPrognosisScore(),
         transactions: [{
             id: Date.now(),
             type: 'DEPOSIT',
@@ -170,15 +192,11 @@ const vwapData = {
     DOGEEUR: { sumVP: 0, sumVol: 0 }
 };
 
-// 4. HARD TELEMETRY & MAKRO STRICT EVALUATOR (ZERO-TOLERANCE GATEKEEPER)
 function evaluateStrictTelemetryGates(symbol, posType) {
-    // 1. Mempool Gas Filter (Spike Guard gegen hohe Transaktionskosten/Slippage)
     if (telemetryState.mempoolGwei > 75) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Mempool Gas zu hoch (${telemetryState.mempoolGwei} Gwei). Trade storniert.`);
         return false;
     }
-
-    // 2. Exchange Netflow Alignment
     if (posType === 'LONG' && telemetryState.ethNetflow > 500) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Inflow-Spike auf Börsen (+${telemetryState.ethNetflow} ETH). Longs blockiert.`);
         return false;
@@ -187,8 +205,6 @@ function evaluateStrictTelemetryGates(symbol, posType) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Akkumulation (-${Math.abs(telemetryState.ethNetflow)} ETH). Shorts blockiert.`);
         return false;
     }
-
-    // 3. Orderbook Imbalance Verification
     if (posType === 'LONG' && telemetryState.orderbookImbalancePct < 2.0) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Zu wenig Kaufdruck im Buch (${telemetryState.orderbookImbalancePct}% Bids).`);
         return false;
@@ -197,8 +213,6 @@ function evaluateStrictTelemetryGates(symbol, posType) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Zu wenig Verkaufsdruck im Buch (${telemetryState.orderbookImbalancePct}% Asks).`);
         return false;
     }
-
-    // 4. Fear & Greed Overbought/Oversold Guard
     if (posType === 'LONG' && telemetryState.fearAndGreed > 78) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Gier (${telemetryState.fearAndGreed}). Top-Kauf-Schutz aktiv.`);
         return false;
@@ -207,20 +221,14 @@ function evaluateStrictTelemetryGates(symbol, posType) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Angst (${telemetryState.fearAndGreed}). Boden-Verkauf-Schutz aktiv.`);
         return false;
     }
-
-    // 5. Open Interest Liquidation Spike Guard
     if (telemetryState.openInterestChangePct > 4.5) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> OI-Hebelüberhitzung (+${telemetryState.openInterestChangePct}%). Squeeze-Gefahr.`);
         return false;
     }
-
-    // 6. Solar Geomagnetic Storm Safeguard
     if (telemetryState.solarGeomagneticKp >= 6.0) {
         broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Geomagnetischer Sturm (Kp ${telemetryState.solarGeomagneticKp}). System im Safe-Mode.`);
         return false;
     }
-
-    // 7. Makro DXY & Equity Market Divergence Filter
     if (posType === 'LONG' && macroMatrixState.dxyChangePct > 0.35) {
         broadcastLog(`🌐 <span class="text-rose-400 font-bold">MAKRO-BLOCK (${symbol}):</span> DXY steigt stark (+${macroMatrixState.dxyChangePct}%). Krypto-Longs geblockt.`);
         return false;
@@ -229,7 +237,6 @@ function evaluateStrictTelemetryGates(symbol, posType) {
         broadcastLog(`🌐 <span class="text-rose-400 font-bold">MAKRO-BLOCK (${symbol}):</span> US-Tech-Aktien brechen ein (${macroMatrixState.nasdaq100ChangePct}% NASDAQ). Long geblockt.`);
         return false;
     }
-
     return true;
 }
 
@@ -283,6 +290,7 @@ function broadcastState() {
     globalState.aiState = aiState;
     globalState.telemetry = telemetryState;
     globalState.macroMatrix = macroMatrixState;
+    globalState.prognosisScore = calculateHolisticPrognosisScore();
 
     if (globalState.profileId === 'AUTO_KI') {
         const dynProf = generateDynamicAiProfile();
@@ -340,7 +348,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         }
     }
 
-    // POSITION ÜBERWACHEN & OPEN-END TRAILING STOP
     if (globalState.inPosition && globalState.position) {
         const pos = globalState.position;
         if (symbol !== pos.symbol) return;
@@ -439,7 +446,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             broadcastState();
         }
     } 
-    // NEUE POSITION ERÖFFNEN
     else if (!globalState.inPosition && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= currentProfile.margin) {
         
         if (globalState.dailyHardLockActive) return;
@@ -469,7 +475,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         const isOverextendedLong = posType === 'LONG' && vwapDiffPct > 0.80;
         const isOverextendedShort = posType === 'SHORT' && vwapDiffPct < -0.80;
 
-        // EXTENSION: STRIKTE TELEMETRIE- UND MAKRO-SCHRANKE
         const isTelemetryPermitted = evaluateStrictTelemetryGates(symbol, posType);
 
         if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort) && isTrendAligned && !isOverextendedLong && !isOverextendedShort && isTelemetryPermitted) {
