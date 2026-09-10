@@ -110,11 +110,9 @@ function calculateKellyMargin() {
 
     let kellyFraction = (p * b - (1 - p)) / b;
 
-    // Maximale Zuteilungsquote steigt mit der Confidence (von 2.5% bis zu max 25%)
     let dynamicMaxFraction = Math.max(0.025, (aiState.confidence / 100) * 0.25);
     let targetFraction = Math.max(0.025, Math.min(dynamicMaxFraction, kellyFraction));
 
-    // Bei extrem sicheren Setups (Confidence >= 80% & Win-Streak) Vollausschöpfung bis 25%
     if (aiState.confidence >= 80 && aiState.consecutiveWins >= 1) {
         targetFraction = Math.min(0.25, targetFraction * 1.4);
     }
@@ -394,7 +392,7 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 5. TRADING ENGINE KERN WITH PARABOLIC TRAILING & BLOW-OFF TOP LOCK
+// 5. TRADING ENGINE KERN WITH ANTI-STOP-HUNT & PARABOLIC TRAILING ENGINE
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
@@ -441,7 +439,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
         const currentCvd = cvdEuro[symbol] || 0;
 
-        // Break-Even Trigger
+        // Break-Even Trigger bei +0.25%
         if (pos.peakProfitPct >= 0.25 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.15;
@@ -449,57 +447,58 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             broadcastState();
         }
 
-        // DYNAMISCHES PARABOLISCHES TRAILING & BLOW-OFF TOP LOCK
+        // Parabolisches Trailing & Blow-Off Top Lock im Plus
         if (pos.breakEvenTriggered) {
-            let trailingDistance = 0.15; // Standard-Abstand
+            let trailingDistance = 0.15;
+            if (priceChangePct >= 2.00) trailingDistance = 0.45;
+            else if (priceChangePct >= 1.00) trailingDistance = 0.30;
+            else if (priceChangePct >= 0.50) trailingDistance = 0.20;
 
-            // 1. Parabolischer Ausbruch: Abstand aufweiten für Raum bei Mega-Pumps
-            if (priceChangePct >= 2.00) {
-                trailingDistance = 0.45; // Viel Atemraum bei vertikalen Rallies
-            } else if (priceChangePct >= 1.00) {
-                trailingDistance = 0.30;
-            } else if (priceChangePct >= 0.50) {
-                trailingDistance = 0.20;
-            }
-
-            // 2. Blow-Off Top Schutz: CVD-Volumen fällt am Peak ab -> Blitzschnell sichern!
             const isCvdReversing = (pos.type === 'LONG' && currentCvd < 0) || (pos.type === 'SHORT' && currentCvd > 0);
-            if (priceChangePct >= 0.70 && isCvdReversing) {
-                trailingDistance = 0.08; // Enge Notbremse am Hochpunkt
-            }
+            if (priceChangePct >= 0.70 && isCvdReversing) trailingDistance = 0.08;
 
             let targetSL = priceChangePct - trailingDistance;
 
             if (targetSL > -pos.dynamicSLPct + 0.03) {
                 pos.dynamicSLPct = -targetSL;
-                broadcastLog(`🚀 <span class="text-emerald-400 font-bold">PARABOLIC TRAILING:</span> Peak +${priceChangePct.toFixed(2)}% | SL auf +${targetSL.toFixed(2)}% gesichert (Abstand: ${trailingDistance.toFixed(2)}%)`);
+                broadcastLog(`🚀 <span class="text-emerald-400 font-bold">PARABOLIC TRAILING:</span> Peak +${priceChangePct.toFixed(2)}% | SL +${targetSL.toFixed(2)}% (Abstand: ${trailingDistance.toFixed(2)}%)`);
                 broadcastState();
             }
         }
 
-        const isCvdFavorable = (pos.type === 'LONG' && currentCvd >= -8000) || (pos.type === 'SHORT' && currentCvd <= 8000);
+        // V-SHAPE ERHOLUNGS-DETEKTOR (Anti-Stop-Hunt Logik)
+        const history = priceHistory[symbol] || [];
+        const lastPrice = history.length >= 2 ? history[history.length - 2] : price;
+        const isActivelyRebounding = (pos.type === 'LONG' && price > lastPrice) || (pos.type === 'SHORT' && price < lastPrice);
+
+        // ERKENNUNG VON ABREISSENDEM VERKAUFSDRUCK (Liquidation Sweep Rejection)
+        const isSellingDriedUp = Math.abs(euroVolumeDelta) < 1500; 
         const isTrendStillValid = check5MinTrend(symbol, price, pos.type, currentProfile);
 
-        const atrPct = (priceHistory[symbol].length >= 12) 
-            ? ((Math.max(...priceHistory[symbol].slice(-12)) - Math.min(...priceHistory[symbol].slice(-12))) / price) * 100 
-            : 0.4;
-        const isQuietMarket = atrPct < 0.35;
+        const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
 
-        let effectiveMaxHoldTime = currentProfile.timeoutSec;
-        let effectiveSL = pos.dynamicSLPct;
-
-        if (priceChangePct < 0 && !pos.breakEvenTriggered) {
-            if (isTrendStillValid && isCvdFavorable && isQuietMarket) {
-                effectiveMaxHoldTime = 360;
-                effectiveSL = Math.min(1.30, currentProfile.sl * 1.6);
+        // TIMEOUT-FREEZE BEI ERHOLUNG ZUR V-FORM
+        let timeoutTriggered = false;
+        if (timeInTradeSec >= currentProfile.timeoutSec) {
+            if (isActivelyRebounding || (isSellingDriedUp && isTrendStillValid)) {
+                if (timeInTradeSec >= 360) {
+                    timeoutTriggered = true;
+                }
+            } else {
+                timeoutTriggered = true;
             }
         }
 
-        const emergencyHardSL = 1.80;
-        const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
+        // SL PUFFER BEI ERHOLUNGSKERZEN (Verhindert Ausstiege an reinen Nadelstichen)
+        let effectiveSL = pos.dynamicSLPct;
+        if (priceChangePct < 0 && !pos.breakEvenTriggered) {
+            if (isActivelyRebounding || isSellingDriedUp) {
+                effectiveSL = Math.min(1.40, currentProfile.sl * 1.75);
+            }
+        }
 
+        const emergencyHardSL = 1.80; // Notbremse bei echten Flash-Crashes
         let stopLossTriggered = (priceChangePct <= -effectiveSL) || (priceChangePct <= -emergencyHardSL);
-        let timeoutTriggered = (timeInTradeSec >= effectiveMaxHoldTime);
 
         if (stopLossTriggered || timeoutTriggered) {
             globalState.inPosition = false;
@@ -539,7 +538,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000 * (consecutiveLosses >= 2 ? 1.5 : 1));
 
             let exitReason = `🤖 ${currentProfile.name} ${symbol} ${pos.type}`;
-            if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${effectiveMaxHoldTime}s)`;
+            if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${timeInTradeSec}s)`;
             else if (pos.breakEvenTriggered) exitReason = `🛡️ Trailing/Break-Even Ausstieg`;
 
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
