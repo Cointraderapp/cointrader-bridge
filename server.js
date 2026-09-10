@@ -6,7 +6,7 @@ const fs = require('fs');
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine v6.3 Institutional Quantum AI Edition'));
+app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine v6.3 Institutional Telemetry & Quantum AI Edition'));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -14,7 +14,7 @@ const wss = new WebSocket.Server({ server });
 const clients = new Set();
 const AI_MEMORY_FILE = './ai_memory.json';
 
-// 1. STRATEGIE-PROFILE INKL. 4. MODUS "QUANTUM-KI (AUTO_KI)"
+// 1. STRATEGIE-PROFILE
 const PROFILES = {
     AUTO_KI: { id: 'AUTO_KI', name: 'Quantum-KI 🤖', isDynamic: true },
     SAVE: { id: 'SAVE', name: 'Top5-Save 🛡️', cvdThreshold: 80000, minRangePct: 0.40, leverage: 10, margin: 2000, tp: 0.50, sl: 0.60, timeoutSec: 75, cooldownSec: 30, use5MinTrend: true },
@@ -22,12 +22,32 @@ const PROFILES = {
     RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 15000, minRangePct: 0.10, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10, use5MinTrend: false }
 };
 
-// 2. KI-GEDÄCHTNIS & PERSISTENZ-SPEICHER
+// 2. LIVE TELEMETRIE & MAKRO MATRIX STATE
+let telemetryState = {
+    mempoolGwei: 32,
+    ethNetflow: -1814,          // Negative ETH = Akkumulation (Bullish)
+    orderbookImbalancePct: 14.92, // Positive = Bids > Asks
+    fearAndGreed: 28,           // < 20 Extreme Fear, > 80 Extreme Greed
+    openInterestChangePct: 2.1,
+    socialVelocitySpike: 1.3,
+    solarGeomagneticKp: 2.8,    // > 6.0 = Extreme Storm
+    tideGravitationalVector: 0.82
+};
+
+let macroMatrixState = {
+    dxyIndex: 104.20,
+    dxyChangePct: -0.06,
+    nasdaq100ChangePct: 0.84,
+    sp500ChangePct: 0.28,
+    goldChangePct: 0.15
+};
+
+// 3. KI-GEDÄCHTNIS & PERSISTENZ-SPEICHER
 let aiState = {
-    confidence: 50,            // 0% bis 100% Score
+    confidence: 50,
     consecutiveLosses: 0,
     consecutiveWins: 0,
-    marketAggressiveness: 1.0  // Multiplikator für Schwellen/Pausen
+    marketAggressiveness: 1.0
 };
 
 function loadAiMemory() {
@@ -53,7 +73,6 @@ function saveAiMemory() {
     }
 }
 
-// FEEDBACK-LOOP LERNFUNKTION
 function trainAgentAfterTrade(netProfit) {
     if (netProfit > 0) {
         aiState.consecutiveWins++;
@@ -71,7 +90,6 @@ function trainAgentAfterTrade(netProfit) {
     saveAiMemory();
 }
 
-// DYNAMISCHE PARAMETER-GENERIERUNG FÜR DAS KI-PROFIL
 function generateDynamicAiProfile() {
     let dynamicLeverage = Math.max(5, Math.floor((aiState.confidence / 100) * 50));
     let baseCvd = 60000; 
@@ -111,16 +129,18 @@ function getInitialState() {
         sl: defaultProfile.sl,
         balance: 20000,
         totalProfit: 0,
-        dailyStartBalance: 20000,   // Startkapital des Tages
-        dailyPnL: 0,                // Akkumulierter Tagesgewinn/-verlust
-        dailyHardLockActive: false, // Tages-Notabschaltung
-        dailyLossLimitPct: 0.10,    // Max 10% Drawdown pro Tag
+        dailyStartBalance: 20000,
+        dailyPnL: 0,
+        dailyHardLockActive: false,
+        dailyLossLimitPct: 0.10,
         tradesCount: 0,
         winCount: 0,
         inPosition: false,
         position: null,
         logs: [],
         aiState: aiState,
+        telemetry: telemetryState,
+        macroMatrix: macroMatrixState,
         transactions: [{
             id: Date.now(),
             type: 'DEPOSIT',
@@ -150,7 +170,69 @@ const vwapData = {
     DOGEEUR: { sumVP: 0, sumVol: 0 }
 };
 
-// 3. TAGES-DRAWDOWN RESET (00:00 UTC)
+// 4. HARD TELEMETRY & MAKRO STRICT EVALUATOR (ZERO-TOLERANCE GATEKEEPER)
+function evaluateStrictTelemetryGates(symbol, posType) {
+    // 1. Mempool Gas Filter (Spike Guard gegen hohe Transaktionskosten/Slippage)
+    if (telemetryState.mempoolGwei > 75) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Mempool Gas zu hoch (${telemetryState.mempoolGwei} Gwei). Trade storniert.`);
+        return false;
+    }
+
+    // 2. Exchange Netflow Alignment
+    if (posType === 'LONG' && telemetryState.ethNetflow > 500) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Inflow-Spike auf Börsen (+${telemetryState.ethNetflow} ETH). Longs blockiert.`);
+        return false;
+    }
+    if (posType === 'SHORT' && telemetryState.ethNetflow < -2000) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Akkumulation (-${Math.abs(telemetryState.ethNetflow)} ETH). Shorts blockiert.`);
+        return false;
+    }
+
+    // 3. Orderbook Imbalance Verification
+    if (posType === 'LONG' && telemetryState.orderbookImbalancePct < 2.0) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Zu wenig Kaufdruck im Buch (${telemetryState.orderbookImbalancePct}% Bids).`);
+        return false;
+    }
+    if (posType === 'SHORT' && telemetryState.orderbookImbalancePct > -2.0) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Zu wenig Verkaufsdruck im Buch (${telemetryState.orderbookImbalancePct}% Asks).`);
+        return false;
+    }
+
+    // 4. Fear & Greed Overbought/Oversold Guard
+    if (posType === 'LONG' && telemetryState.fearAndGreed > 78) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Gier (${telemetryState.fearAndGreed}). Top-Kauf-Schutz aktiv.`);
+        return false;
+    }
+    if (posType === 'SHORT' && telemetryState.fearAndGreed < 22) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Angst (${telemetryState.fearAndGreed}). Boden-Verkauf-Schutz aktiv.`);
+        return false;
+    }
+
+    // 5. Open Interest Liquidation Spike Guard
+    if (telemetryState.openInterestChangePct > 4.5) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> OI-Hebelüberhitzung (+${telemetryState.openInterestChangePct}%). Squeeze-Gefahr.`);
+        return false;
+    }
+
+    // 6. Solar Geomagnetic Storm Safeguard
+    if (telemetryState.solarGeomagneticKp >= 6.0) {
+        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Geomagnetischer Sturm (Kp ${telemetryState.solarGeomagneticKp}). System im Safe-Mode.`);
+        return false;
+    }
+
+    // 7. Makro DXY & Equity Market Divergence Filter
+    if (posType === 'LONG' && macroMatrixState.dxyChangePct > 0.35) {
+        broadcastLog(`🌐 <span class="text-rose-400 font-bold">MAKRO-BLOCK (${symbol}):</span> DXY steigt stark (+${macroMatrixState.dxyChangePct}%). Krypto-Longs geblockt.`);
+        return false;
+    }
+    if (posType === 'LONG' && macroMatrixState.nasdaq100ChangePct < -0.60) {
+        broadcastLog(`🌐 <span class="text-rose-400 font-bold">MAKRO-BLOCK (${symbol}):</span> US-Tech-Aktien brechen ein (${macroMatrixState.nasdaq100ChangePct}% NASDAQ). Long geblockt.`);
+        return false;
+    }
+
+    return true;
+}
+
 function checkDailyReset() {
     const now = new Date();
     if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0 && now.getUTCSeconds() < 5) {
@@ -199,6 +281,9 @@ function getSessionMultiplier() {
 
 function broadcastState() {
     globalState.aiState = aiState;
+    globalState.telemetry = telemetryState;
+    globalState.macroMatrix = macroMatrixState;
+
     if (globalState.profileId === 'AUTO_KI') {
         const dynProf = generateDynamicAiProfile();
         globalState.leverage = dynProf.leverage;
@@ -225,7 +310,7 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 4. TRADING ENGINE KERN
+// 5. TRADING ENGINE KERN
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
@@ -267,7 +352,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             pos.peakProfitPct = priceChangePct;
         }
 
-        // Break-Even Trigger
         if (pos.peakProfitPct >= 0.25 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.15;
@@ -275,7 +359,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             broadcastState();
         }
 
-        // Dynamisches Trailing
         if (pos.breakEvenTriggered) {
             let targetSL = null;
             if (priceChangePct >= currentProfile.tp) {
@@ -313,7 +396,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             globalState.dailyPnL += netProfit;
             globalState.tradesCount++;
 
-            // HARD DAILY DRAWDOWN CHECK (MAX 10%)
             const maxAllowedLoss = globalState.dailyStartBalance * globalState.dailyLossLimitPct;
             if (globalState.dailyPnL <= -maxAllowedLoss && !globalState.dailyHardLockActive) {
                 globalState.dailyHardLockActive = true;
@@ -360,7 +442,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     // NEUE POSITION ERÖFFNEN
     else if (!globalState.inPosition && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= currentProfile.margin) {
         
-        // SPERRE BEI TAGES-DRAWDOWN LIMIT
         if (globalState.dailyHardLockActive) return;
 
         const sessionInfo = getSessionMultiplier();
@@ -388,7 +469,10 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         const isOverextendedLong = posType === 'LONG' && vwapDiffPct > 0.80;
         const isOverextendedShort = posType === 'SHORT' && vwapDiffPct < -0.80;
 
-        if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort) && isTrendAligned && !isOverextendedLong && !isOverextendedShort) {
+        // EXTENSION: STRIKTE TELEMETRIE- UND MAKRO-SCHRANKE
+        const isTelemetryPermitted = evaluateStrictTelemetryGates(symbol, posType);
+
+        if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort) && isTrendAligned && !isOverextendedLong && !isOverextendedShort && isTelemetryPermitted) {
             globalState.inPosition = true;
             globalState.position = {
                 symbol: symbol,
@@ -408,7 +492,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     }
 }
 
-// 5. WEBSOCKET CLIENT HANDLER
+// 6. WEBSOCKET CLIENT HANDLER
 wss.on('connection', (ws) => {
     clients.add(ws);
     ws.send(JSON.stringify({ type: 'STATE_UPDATE', state: globalState }));
@@ -465,7 +549,7 @@ wss.on('connection', (ws) => {
     ws.on('close', () => clients.delete(ws));
 });
 
-// 6. BINANCE STREAM INTEGRATION
+// 7. BINANCE STREAM INTEGRATION
 function connectBinanceStream() {
     const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade/dogeusdt@aggTrade');
     binanceWs.on('message', (data) => {
@@ -493,7 +577,7 @@ function connectBinanceStream() {
     binanceWs.on('error', () => binanceWs.close());
 }
 
-// 7. SHUTDOWN HANDLER
+// 8. SHUTDOWN HANDLER
 function handleShutdown(signal) {
     console.log(`[Server] ${signal} empfangen: Sicherung des KI-Gedächtnisses...`);
     saveAiMemory();
