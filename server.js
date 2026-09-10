@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
+const fs = require('fs');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -11,6 +12,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const clients = new Set();
+const AI_MEMORY_FILE = './ai_memory.json';
 
 // 1. STRATEGIE-PROFILE INKL. 4. MODUS "QUANTUM-KI (AUTO_KI)"
 const PROFILES = {
@@ -20,7 +22,7 @@ const PROFILES = {
     RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 15000, minRangePct: 0.10, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10, use5MinTrend: false }
 };
 
-// 2. KI-GEDÄCHTNIS & LERN-STATE (REINFORCEMENT LEARNING AGENT)
+// 2. KI-GEDÄCHTNIS & PERSISTENZ-SPEICHER
 let aiState = {
     confidence: 50,            // 0% bis 100% Score
     consecutiveLosses: 0,
@@ -28,31 +30,50 @@ let aiState = {
     marketAggressiveness: 1.0  // Multiplikator für Schwellen/Pausen
 };
 
-// FEEDBACK-LOOP LERNFUNKTION (TRAINING NACH JEDEM TRADE)
+function loadAiMemory() {
+    try {
+        if (fs.existsSync(AI_MEMORY_FILE)) {
+            const data = fs.readFileSync(AI_MEMORY_FILE, 'utf8');
+            const savedState = JSON.parse(data);
+            if (savedState.aiState) {
+                aiState = savedState.aiState;
+                console.log(`[KI-Gedächtnis] Erfolgreich geladen. Confidence: ${aiState.confidence}%`);
+            }
+        }
+    } catch (e) {
+        console.error('⚠️ [KI-Gedächtnis] Fehler beim Laden:', e);
+    }
+}
+
+function saveAiMemory() {
+    try {
+        fs.writeFileSync(AI_MEMORY_FILE, JSON.stringify({ aiState, updatedAt: Date.now() }, null, 2));
+    } catch (e) {
+        console.error('⚠️ [KI-Gedächtnis] Fehler beim Speichern:', e);
+    }
+}
+
+// FEEDBACK-LOOP LERNFUNKTION
 function trainAgentAfterTrade(netProfit) {
     if (netProfit > 0) {
-        // BELOHNUNG (REWARD)
         aiState.consecutiveWins++;
         aiState.consecutiveLosses = 0;
         aiState.confidence = Math.min(100, aiState.confidence + 5);
         aiState.marketAggressiveness = Math.max(0.5, aiState.marketAggressiveness - 0.1);
-        broadcastLog(`🧠 <span class="text-emerald-400 font-bold">KI-BELOHNUNG (+5%):</span> Win-Streak ${aiState.consecutiveWins}x | confidence: ${aiState.confidence}%`);
+        broadcastLog(`🧠 <span class="text-emerald-400 font-bold">KI-BELOHNUNG (+5%):</span> Win-Streak ${aiState.consecutiveWins}x | Confidence: ${aiState.confidence}%`);
     } else {
-        // BESTRAFUNG (PAIN)
         aiState.consecutiveLosses++;
         aiState.consecutiveWins = 0;
         aiState.confidence = Math.max(0, aiState.confidence - 15);
         aiState.marketAggressiveness = Math.min(3.0, aiState.marketAggressiveness + 0.5);
-        broadcastLog(`🚨 <span class="text-rose-400 font-bold">KI-BESTRAFUNG (-15%):</span> Defensive Haltung aktiviert | confidence: ${aiState.confidence}%`);
+        broadcastLog(`🚨 <span class="text-rose-400 font-bold">KI-BESTRAFUNG (-15%):</span> Defensive Haltung aktiviert | Confidence: ${aiState.confidence}%`);
     }
+    saveAiMemory();
 }
 
 // DYNAMISCHE PARAMETER-GENERIERUNG FÜR DAS KI-PROFIL
 function generateDynamicAiProfile() {
-    // Dynamic Leverage (5x bei Mutlosigkeit, bis zu 50x bei Hoher Confidence)
     let dynamicLeverage = Math.max(5, Math.floor((aiState.confidence / 100) * 50));
-    
-    // CVD-Hürde: Je höher die Aggressivität/Angst, desto höher die Schwelle
     let baseCvd = 60000; 
     let dynamicCvd = Math.round(baseCvd * aiState.marketAggressiveness);
 
@@ -63,8 +84,8 @@ function generateDynamicAiProfile() {
         minRangePct: 0.15,
         leverage: dynamicLeverage,
         margin: 2000,
-        tp: parseFloat((0.50 + (aiState.confidence / 100) * 0.30).toFixed(2)), // TP weiter weg bei hohem Confidence
-        sl: parseFloat((0.80 - (aiState.confidence / 100) * 0.40).toFixed(2)), // SL enger bei hohem Confidence
+        tp: parseFloat((0.50 + (aiState.confidence / 100) * 0.30).toFixed(2)),
+        sl: parseFloat((0.80 - (aiState.confidence / 100) * 0.40).toFixed(2)),
         timeoutSec: 90,
         cooldownSec: Math.round(15 * aiState.marketAggressiveness),
         use5MinTrend: true,
@@ -90,6 +111,10 @@ function getInitialState() {
         sl: defaultProfile.sl,
         balance: 20000,
         totalProfit: 0,
+        dailyStartBalance: 20000,   // Startkapital des Tages
+        dailyPnL: 0,                // Akkumulierter Tagesgewinn/-verlust
+        dailyHardLockActive: false, // Tages-Notabschaltung
+        dailyLossLimitPct: 0.10,    // Max 10% Drawdown pro Tag
         tradesCount: 0,
         winCount: 0,
         inPosition: false,
@@ -103,12 +128,11 @@ function getInitialState() {
             timestamp: Date.now(),
             entryPrice: 72700,
             note: 'Startkapital System'
-        }],
-        circuitBreakerActive: false,
-        circuitBreakerUntil: 0
+        }]
     };
 }
 
+loadAiMemory();
 let globalState = getInitialState();
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
@@ -125,6 +149,21 @@ const vwapData = {
     XRPEUR: { sumVP: 0, sumVol: 0 },
     DOGEEUR: { sumVP: 0, sumVol: 0 }
 };
+
+// 3. TAGES-DRAWDOWN RESET (00:00 UTC)
+function checkDailyReset() {
+    const now = new Date();
+    if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0 && now.getUTCSeconds() < 5) {
+        if (globalState.dailyHardLockActive || globalState.dailyPnL !== 0) {
+            globalState.dailyStartBalance = globalState.balance;
+            globalState.dailyPnL = 0;
+            globalState.dailyHardLockActive = false;
+            broadcastLog(`🌅 <span class="text-cyan-400 font-bold">TAGES-RESET (00:00 UTC):</span> Daily Limit erneuert. Startkapital: ${globalState.balance.toFixed(2)} €`);
+            broadcastState();
+        }
+    }
+}
+setInterval(checkDailyReset, 4000);
 
 function getVWAP(symbol, price, euroVolume) {
     const data = vwapData[symbol] || { sumVP: 0, sumVol: 0 };
@@ -186,7 +225,7 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 3. TRADING ENGINE KERN MIT DYNAMISCHER KI-STEUERUNG
+// 4. TRADING ENGINE KERN
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
@@ -198,7 +237,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
     if (!globalState.agentActive) return;
 
-    // ABRUFEN DES AKTIVEN PROFILO (STATISCH ODER DYNAMISCH ERRECHNET)
     const currentProfile = getActiveProfile();
 
     let isChopMarket = true;
@@ -272,7 +310,15 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             globalState.position = null;
             globalState.totalProfit += netProfit;
             globalState.balance += netProfit;
+            globalState.dailyPnL += netProfit;
             globalState.tradesCount++;
+
+            // HARD DAILY DRAWDOWN CHECK (MAX 10%)
+            const maxAllowedLoss = globalState.dailyStartBalance * globalState.dailyLossLimitPct;
+            if (globalState.dailyPnL <= -maxAllowedLoss && !globalState.dailyHardLockActive) {
+                globalState.dailyHardLockActive = true;
+                broadcastLog(`🚨 <span class="text-rose-500 font-bold">HARD DAILY DRAWDOWN LIMIT:</span> Tagesverlust von ${Math.abs(globalState.dailyPnL).toFixed(2)} € (≥10%) erreicht! Trades bis 00:00 UTC gesperrt.`);
+            }
             
             const isWin = netProfit >= 0;
             if (isWin) {
@@ -285,7 +331,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 }
             }
 
-            // KI-LERNLOGIK TRITT BEI AUTO_KI EIN
             if (globalState.profileId === 'AUTO_KI') {
                 trainAgentAfterTrade(netProfit);
             }
@@ -314,17 +359,19 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     } 
     // NEUE POSITION ERÖFFNEN
     else if (!globalState.inPosition && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= currentProfile.margin) {
+        
+        // SPERRE BEI TAGES-DRAWDOWN LIMIT
+        if (globalState.dailyHardLockActive) return;
+
         const sessionInfo = getSessionMultiplier();
         const currentCvd = cvdEuro[symbol] || 0;
 
         let requiredEuroCvd = currentProfile.cvdThreshold * sessionInfo.multiplier;
         
-        // Whale Sweep Boost (-30% Schwelle bei Wal-Aktivität)
         if (now < whaleSpikes[symbol]) {
             requiredEuroCvd *= 0.70;
         }
 
-        // Anti-Whipsaw Strafe (+80% Schwelle bei Pechsträhne)
         if (consecutiveLosses >= 2) {
             requiredEuroCvd *= 1.80;
         }
@@ -361,7 +408,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     }
 }
 
-// 4. WEBSOCKET CLIENT HANDLER
+// 5. WEBSOCKET CLIENT HANDLER
 wss.on('connection', (ws) => {
     clients.add(ws);
     ws.send(JSON.stringify({ type: 'STATE_UPDATE', state: globalState }));
@@ -402,8 +449,13 @@ wss.on('connection', (ws) => {
             }
             if (parsed.type === 'TX_UPDATE' && parsed.tx) {
                 globalState.transactions.push(parsed.tx);
-                if (parsed.tx.type === 'DEPOSIT') globalState.balance += parsed.tx.eur;
-                else if (parsed.tx.type === 'WITHDRAW') globalState.balance -= parsed.tx.eur;
+                if (parsed.tx.type === 'DEPOSIT') {
+                    globalState.balance += parsed.tx.eur;
+                    globalState.dailyStartBalance += parsed.tx.eur;
+                } else if (parsed.tx.type === 'WITHDRAW') {
+                    globalState.balance -= parsed.tx.eur;
+                    globalState.dailyStartBalance -= parsed.tx.eur;
+                }
                 broadcastLog(`💶 <span class="text-emerald-400 font-bold">DEPOSIT/WITHDRAW:</span> ${parsed.tx.type} über ${parsed.tx.eur} €.`);
                 broadcastState();
                 return;
@@ -413,7 +465,7 @@ wss.on('connection', (ws) => {
     ws.on('close', () => clients.delete(ws));
 });
 
-// 5. BINANCE STREAM INTEGRATION
+// 6. BINANCE STREAM INTEGRATION
 function connectBinanceStream() {
     const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade/dogeusdt@aggTrade');
     binanceWs.on('message', (data) => {
@@ -441,12 +493,13 @@ function connectBinanceStream() {
     binanceWs.on('error', () => binanceWs.close());
 }
 
-// 6. SHUTDOWN HANDLER
+// 7. SHUTDOWN HANDLER
 function handleShutdown(signal) {
-    console.log(`[Server] ${signal} empfangen: Status bleibt erhalten.`);
+    console.log(`[Server] ${signal} empfangen: Sicherung des KI-Gedächtnisses...`);
+    saveAiMemory();
     const payload = JSON.stringify({ 
         type: 'LOG_EVENT', 
-        log: { time: new Date().toLocaleTimeString('de-DE'), message: '🔄 <span class="text-amber-400 font-bold">CLOUD NEUSTART:</span> Render führt Server-Sync durch.' } 
+        log: { time: new Date().toLocaleTimeString('de-DE'), message: '🔄 <span class="text-amber-400 font-bold">CLOUD NEUSTART:</span> Render Sync. Status gesichert.' } 
     });
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
     setTimeout(() => { process.exit(0); }, 1000);
