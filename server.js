@@ -54,6 +54,9 @@ let aiState = {
     avgWinMae: 0.42                // Durschnittlicher Maximalrücksetzer erfolgreicher Trades
 };
 
+// GLOBAL STATE REFERENZ VOAB DECLARIEREN
+let globalState = null;
+
 function calculateHolisticPrognosisScore() {
     let score = 50;
 
@@ -96,12 +99,14 @@ function saveAiMemory() {
 
 // INSTITUTIONELLES KELLY-KRITERIUM FÜR DYNAMISCHE POSITIONSGRÖSSEN (BIS ZU 25% DER EINLAGEN)
 function calculateKellyMargin() {
-    const currentBalance = globalState.balance || 20000;
+    const currentBalance = (globalState && globalState.balance) ? globalState.balance : 20000;
+    const tradesCount = (globalState && globalState.tradesCount) ? globalState.tradesCount : 0;
+    const winCount = (globalState && globalState.winCount) ? globalState.winCount : 0;
     
     // Obergrenze = exakt 25% des aktuellen Depotguthabens
     const maxAllowedMargin = Math.round(currentBalance * 0.25); 
 
-    let p = globalState.tradesCount >= 3 ? (globalState.winCount / globalState.tradesCount) : 0.60;
+    let p = tradesCount >= 3 ? (winCount / tradesCount) : 0.60;
     p = Math.max(0.25, Math.min(0.90, p));
 
     const tpRatio = (aiState.confidence / 100) * 0.30 + 0.50;
@@ -110,11 +115,9 @@ function calculateKellyMargin() {
 
     let kellyFraction = (p * b - (1 - p)) / b;
 
-    // Maximale Zuteilungsquote steigt mit der Confidence (von 2.5% bis zu max 25%)
     let dynamicMaxFraction = Math.max(0.025, (aiState.confidence / 100) * 0.25);
     let targetFraction = Math.max(0.025, Math.min(dynamicMaxFraction, kellyFraction));
 
-    // Bei extrem sicheren Setups (Confidence >= 80% & Win-Streak) Vollausschöpfung bis 25%
     if (aiState.confidence >= 80 && aiState.consecutiveWins >= 1) {
         targetFraction = Math.min(0.25, targetFraction * 1.4);
     }
@@ -173,10 +176,10 @@ function generateDynamicAiProfile() {
 }
 
 function getActiveProfile() {
-    if (globalState.profileId === 'AUTO_KI') {
+    if (globalState && globalState.profileId === 'AUTO_KI') {
         return generateDynamicAiProfile();
     }
-    return PROFILES[globalState.profileId] || PROFILES.MEDIUM;
+    return PROFILES[(globalState && globalState.profileId) ? globalState.profileId : 'AUTO_KI'] || PROFILES.MEDIUM;
 }
 
 function getInitialState() {
@@ -215,7 +218,8 @@ function getInitialState() {
 }
 
 loadAiMemory();
-let globalState = getInitialState();
+globalState = getInitialState();
+
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
 
