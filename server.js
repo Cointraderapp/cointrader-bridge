@@ -54,7 +54,7 @@ let aiState = {
     avgWinMae: 0.42                // Durschnittlicher Maximalrücksetzer erfolgreicher Trades
 };
 
-// GLOBAL STATE REFERENZ VOAB DECLARIEREN
+// GLOBAL STATE REFERENZ VORAB DECLARIEREN (STARTUP-CRASH-PROTECTION)
 let globalState = null;
 
 function calculateHolisticPrognosisScore() {
@@ -158,12 +158,14 @@ function generateDynamicAiProfile() {
     let kellyMargin = calculateKellyMargin();
 
     let adaptiveSl = Math.max(0.35, Math.min(1.10, aiState.avgWinMae * 1.25));
+    // DYNAMISCH ERHÖHTE MIN-RANGE UM EINSCHLAF-MÄRKTE UND TIMEOUT-FEHLER ZU FILTERN
+    let adaptiveMinRange = parseFloat(Math.max(0.18, 0.12 * aiState.marketAggressiveness).toFixed(2));
 
     return {
         id: 'AUTO_KI',
         name: `Quantum-KI (${aiState.confidence}% Conf)`,
         cvdThreshold: dynamicCvd,
-        minRangePct: 0.10,
+        minRangePct: adaptiveMinRange,
         leverage: dynamicLeverage,
         margin: kellyMargin,
         tp: parseFloat((0.50 + (aiState.confidence / 100) * 0.30).toFixed(2)),
@@ -272,6 +274,21 @@ function evaluateStrictTelemetryGates(symbol, posType) {
 
     if (detectIcebergAbsorption(symbol, prices[symbol] || 100)) {
         return false;
+    }
+
+    // VOLATILITÄTS- & TOTMANN-FILTER (Sperrt Einstiege in leblosen Seitwärtsphasen)
+    const history = priceHistory[symbol];
+    if (history && history.length >= 24) {
+        const recentSlice = history.slice(-24); // Letzte 2 Min (bei 5s Ticks)
+        const maxP = Math.max(...recentSlice);
+        const minP = Math.min(...recentSlice);
+        const currentP = prices[symbol] || maxP;
+        const twoMinVolaPct = ((maxP - minP) / currentP) * 100;
+
+        if (twoMinVolaPct < 0.12) {
+            broadcastLog(`💤 <span class="text-slate-400 font-bold">VOLATILITÄTS-BLOCK (${symbol}):</span> Markt zu träge (Range: ${twoMinVolaPct.toFixed(2)}%). Timeout-Gefahr.`);
+            return false;
+        }
     }
 
     if (telemetryState.simulatedSpreadPct > 0.045) {
