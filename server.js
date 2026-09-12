@@ -2,16 +2,18 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const mongoose = require('mongoose');
+const path = require('path');
 
 const app = express();
 app.use(express.json()); // JSON-Parser Middleware für Pre-Training API Requests
+app.use(express.static(__dirname));
 
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine v6.3 Institutional Telemetry & Quantum AI Edition'));
 
 // ----------------------------------------------------------------
-// PRE-TRAINING ENDPUNKT (HISTORISCHE TRADES EINSPEISEN)
+// PRE-TRAINING ENDPUNKT (HISTORISCHE TRADES & BIG DATA EINSPEISEN)
 // ----------------------------------------------------------------
 app.post('/api/pretrain', async (req, res) => {
     const { trades } = req.body; // Erwartet Array: [{ profit: 25.5, mae: -0.12 }, ...]
@@ -29,14 +31,22 @@ app.post('/api/pretrain', async (req, res) => {
         trainAgentAfterTrade(t.profit, t.mae);
     });
 
+    // Bei größeren Datensätzen (≥20 Trades) Confidence exakt auf die reale Win-Rate kalibrieren
+    if (trades.length >= 20) {
+        const winRate = winCount / trades.length;
+        aiState.confidence = Math.min(95, Math.max(20, Math.round(winRate * 100)));
+    }
+
     await saveAiMemory();
     broadcastState();
     
-    broadcastLog(`🎓 <span class="text-indigo-400 font-bold">PRE-TRAINING ABGESCHLOSSEN:</span> ${trades.length} historische Trades verarbeitet (${winCount} Wins / ${lossCount} Losses). Neue Confidence: ${aiState.confidence}% | MAE-Avg: ${aiState.avgWinMae}%`);
+    const winRatePct = ((winCount / trades.length) * 100).toFixed(1);
+    broadcastLog(`🎓 <span class="text-indigo-400 font-bold">PRE-TRAINING ABGESCHLOSSEN:</span> ${trades.length} Trades verarbeitet (${winCount} Wins / ${lossCount} Losses | Win-Rate: ${winRatePct}%). Neue Confidence: ${aiState.confidence}% | MAE-Avg: ${aiState.avgWinMae}%`);
     
     res.json({ 
         success: true, 
         processedTrades: trades.length, 
+        winRatePct: winRatePct,
         currentAiState: aiState 
     });
 });
@@ -179,7 +189,7 @@ function trainAgentAfterTrade(netProfit, tradeMae) {
         if (tradeMae !== undefined && tradeMae < 0) {
             const winMae = Math.abs(tradeMae);
             aiState.maeHistory.push(winMae);
-            if (aiState.maeHistory.length > 25) aiState.maeHistory.shift();
+            if (aiState.maeHistory.length > 1000) aiState.maeHistory.shift(); // Erweitert auf 1.000 Trades Speicher
             aiState.avgWinMae = parseFloat((aiState.maeHistory.reduce((a, b) => a + b, 0) / aiState.maeHistory.length).toFixed(2));
         }
 
