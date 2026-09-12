@@ -108,13 +108,12 @@ async function saveAiMemory() {
     }
 }
 
-// INSTITUTIONELLES KELLY-KRITERIUM FÜR DYNAMISCHE POSITIONSGRÖSSEN (BIS ZU 25% DER EINLAGEN)
+// INSTITUTIONELLES KELLY-KRITERIUM FÜR DYNAMISCHE POSITIONSGRÖSSEN
 function calculateKellyMargin() {
     const currentBalance = (globalState && globalState.balance) ? globalState.balance : 20000;
     const tradesCount = (globalState && globalState.tradesCount) ? globalState.tradesCount : 0;
     const winCount = (globalState && globalState.winCount) ? globalState.winCount : 0;
     
-    // Obergrenze = exakt 25% des aktuellen Depotguthabens
     const maxAllowedMargin = Math.round(currentBalance * 0.25); 
 
     let p = tradesCount >= 3 ? (winCount / tradesCount) : 0.60;
@@ -122,7 +121,7 @@ function calculateKellyMargin() {
 
     const tpRatio = (aiState.confidence / 100) * 0.30 + 0.50;
     const slRatio = Math.max(0.2, aiState.avgWinMae * 1.2);
-    const b = tpRatio / slRatio; // Risk/Reward Ratio
+    const b = tpRatio / slRatio;
 
     let kellyFraction = (p * b - (1 - p)) / b;
 
@@ -169,7 +168,6 @@ function generateDynamicAiProfile() {
     let kellyMargin = calculateKellyMargin();
 
     let adaptiveSl = Math.max(0.35, Math.min(1.10, aiState.avgWinMae * 1.25));
-    // DYNAMISCH ERHÖHTE MIN-RANGE UM EINSCHLAF-MÄRKTE UND TIMEOUT-FEHLER ZU FILTERN
     let adaptiveMinRange = parseFloat(Math.max(0.18, 0.12 * aiState.marketAggressiveness).toFixed(2));
 
     return {
@@ -233,21 +231,56 @@ function getInitialState() {
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
 
-const prices = { BTCEUR: 72700, ETHEUR: 2290, SOLEUR: 95.4, XRPEUR: 0.58, DOGEEUR: 0.12 };
-const cvdEuro = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
-const priceHistory = { BTCEUR: [], ETHEUR: [], SOLEUR: [], XRPEUR: [], DOGEEUR: [] };
-const whaleSpikes = { BTCEUR: 0, ETHEUR: 0, SOLEUR: 0, XRPEUR: 0, DOGEEUR: 0 };
+// DYNAMISCHE STRUKTUREN FÜR JEDEN AKTIVEN COIN
+const prices = {};
+const cvdEuro = {};
+const priceHistory = {};
+const whaleSpikes = {};
+const vwapData = {};
 
-const vwapData = {
-    BTCEUR: { sumVP: 0, sumVol: 0 },
-    ETHEUR: { sumVP: 0, sumVol: 0 },
-    SOLEUR: { sumVP: 0, sumVol: 0 },
-    XRPEUR: { sumVP: 0, sumVol: 0 },
-    DOGEEUR: { sumVP: 0, sumVol: 0 }
-};
+// 4. DYNAMIC MARKET SCREENER MODULE (TOP 15 HOT COINS)
+let activeSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'dogeusdt'];
+let binanceWs = null;
 
-// 4. INSTITUTIONELLE SCHUTZ-GATEKEEPER & SENSORDETEKTOREN
+async function fetchTopScreenerPairs() {
+    try {
+        const response = await fetch('https://api.binance.com/api/v3/ticker/24hr');
+        if (!response.ok) throw new Error(`HTTP Status ${response.status}`);
+        const tickers = await response.json();
 
+        const filtered = tickers.filter(t => {
+            const isUSDTorEUR = t.symbol.endsWith('USDT') || t.symbol.endsWith('EUR');
+            const volumeEUR = parseFloat(t.quoteVolume) * 0.92;
+            const isNotLeveragedToken = !t.symbol.includes('UP') && !t.symbol.includes('DOWN');
+            return isUSDTorEUR && volumeEUR >= 30000000 && isNotLeveragedToken; // > 30 Mio. € Volumen
+        });
+
+        filtered.sort((a, b) => {
+            const volaA = Math.abs(parseFloat(a.priceChangePercent));
+            const volaB = Math.abs(parseFloat(b.priceChangePercent));
+            return volaB - volaA; // Höchste Volatilität zuerst
+        });
+
+        const topSymbols = filtered.slice(0, 15).map(t => t.symbol.toLowerCase());
+        return topSymbols.length >= 5 ? topSymbols : activeSymbols;
+    } catch (err) {
+        console.error('⚠️ [Screener] Fehler beim Abrufen der Binance-Ticker:', err.message);
+        return activeSymbols;
+    }
+}
+
+async function syncDynamicStream() {
+    const newSymbols = await fetchTopScreenerPairs();
+    const hasChanged = newSymbols.length !== activeSymbols.length || newSymbols.some((sym, idx) => sym !== activeSymbols[idx]);
+
+    if (hasChanged || !binanceWs || binanceWs.readyState !== WebSocket.OPEN) {
+        activeSymbols = newSymbols;
+        broadcastLog(`🔍 <span class="text-cyan-400 font-bold">HOT-COIN SCREENER:</span> Top 15 Märkte aktualisiert (${activeSymbols.map(s => s.toUpperCase()).slice(0, 5).join(', ')}...)`);
+        connectBinanceStream();
+    }
+}
+
+// 5. INSTITUTIONELLE SCHUTZ-GATEKEEPER & SENSORDETEKTOREN
 function detectIcebergAbsorption(symbol, currentPrice) {
     const history = priceHistory[symbol];
     if (!history || history.length < 15) return false;
@@ -284,10 +317,9 @@ function evaluateStrictTelemetryGates(symbol, posType) {
         return false;
     }
 
-    // VOLATILITÄTS- & TOTMANN-FILTER (Sperrt Einstiege in leblosen Seitwärtsphasen)
     const history = priceHistory[symbol];
     if (history && history.length >= 24) {
-        const recentSlice = history.slice(-24); // Letzte 2 Min (bei 5s Ticks)
+        const recentSlice = history.slice(-24);
         const maxP = Math.max(...recentSlice);
         const minP = Math.min(...recentSlice);
         const currentP = prices[symbol] || maxP;
@@ -423,7 +455,7 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 5. TRADING ENGINE KERN WITH ANTI-STOP-HUNT & PARABOLIC TRAILING ENGINE
+// 6. TRADING ENGINE KERN WITH ANTI-STOP-HUNT & PARABOLIC TRAILING ENGINE
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
@@ -470,7 +502,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
         const currentCvd = cvdEuro[symbol] || 0;
 
-        // Break-Even Trigger bei +0.25%
         if (pos.peakProfitPct >= 0.25 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.15;
@@ -478,7 +509,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             broadcastState();
         }
 
-        // Parabolisches Trailing & Blow-Off Top Lock im Plus
         if (pos.breakEvenTriggered) {
             let trailingDistance = 0.15;
             if (priceChangePct >= 2.00) trailingDistance = 0.45;
@@ -497,18 +527,15 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             }
         }
 
-        // V-SHAPE ERHOLUNGS-DETEKTOR (Anti-Stop-Hunt Logik)
         const history = priceHistory[symbol] || [];
         const lastPrice = history.length >= 2 ? history[history.length - 2] : price;
         const isActivelyRebounding = (pos.type === 'LONG' && price > lastPrice) || (pos.type === 'SHORT' && price < lastPrice);
 
-        // ERKENNUNG VON ABREISSENDEM VERKAUFSDRUCK (Liquidation Sweep Rejection)
         const isSellingDriedUp = Math.abs(euroVolumeDelta) < 1500; 
         const isTrendStillValid = check5MinTrend(symbol, price, pos.type, currentProfile);
 
         const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
 
-        // TIMEOUT-FREEZE BEI ERHOLUNG ZUR V-FORM
         let timeoutTriggered = false;
         if (timeInTradeSec >= currentProfile.timeoutSec) {
             if (isActivelyRebounding || (isSellingDriedUp && isTrendStillValid)) {
@@ -520,7 +547,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             }
         }
 
-        // SL PUFFER BEI ERHOLUNGSKERZEN (Verhindert Ausstiege an reinen Nadelstichen)
         let effectiveSL = pos.dynamicSLPct;
         if (priceChangePct < 0 && !pos.breakEvenTriggered) {
             if (isActivelyRebounding || isSellingDriedUp) {
@@ -528,7 +554,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             }
         }
 
-        const emergencyHardSL = 1.80; // Notbremse bei echten Flash-Crashes
+        const emergencyHardSL = 1.80;
         let stopLossTriggered = (priceChangePct <= -effectiveSL) || (priceChangePct <= -emergencyHardSL);
 
         if (stopLossTriggered || timeoutTriggered) {
@@ -641,7 +667,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     }
 }
 
-// 6. WEBSOCKET CLIENT HANDLER
+// 7. WEBSOCKET CLIENT HANDLER
 wss.on('connection', (ws) => {
     clients.add(ws);
     ws.send(JSON.stringify({ type: 'STATE_UPDATE', state: globalState }));
@@ -698,35 +724,49 @@ wss.on('connection', (ws) => {
     ws.on('close', () => clients.delete(ws));
 });
 
-// 7. BINANCE STREAM INTEGRATION
+// 8. DYNAMISCHE BINANCE MULTI-STREAM INTEGRATION
 function connectBinanceStream() {
-    const binanceWs = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade/dogeusdt@aggTrade');
+    if (binanceWs) {
+        binanceWs.removeAllListeners();
+        try { binanceWs.close(); } catch (e) {}
+    }
+
+    const streamQuery = activeSymbols.map(sym => `${sym}@aggTrade`).join('/');
+    binanceWs = new WebSocket(`wss://stream.binance.com:9443/ws/${streamQuery}`);
+
     binanceWs.on('message', (data) => {
         try {
             const tick = JSON.parse(data);
-            const symbolMap = { 'BTCUSDT': 'BTCEUR', 'ETHUSDT': 'ETHEUR', 'SOLUSDT': 'SOLEUR', 'XRPUSDT': 'XRPEUR', 'DOGEUSDT': 'DOGEEUR' };
-            const symbol = symbolMap[tick.s];
-            if (symbol) {
-                const price = parseFloat(tick.p) * 0.92;
-                const quantity = parseFloat(tick.q);
-                const euroVolume = quantity * price;
-                const euroDelta = tick.m ? -euroVolume : euroVolume;
+            const rawSymbol = tick.s;
+            const displaySymbol = rawSymbol.endsWith('USDT') ? rawSymbol.replace('USDT', 'EUR') : rawSymbol;
+            
+            const rawPrice = parseFloat(tick.p);
+            const price = rawSymbol.endsWith('USDT') ? rawPrice * 0.92 : rawPrice;
+            const quantity = parseFloat(tick.q);
+            const euroVolume = quantity * price;
+            const euroDelta = tick.m ? -euroVolume : euroVolume;
 
-                if (euroVolume >= 100000) {
-                    whaleSpikes[symbol] = Date.now() + 5000;
-                    broadcastLog(`🐳 <span class="text-cyan-400 font-bold">WHALE SWEEP (${symbol}):</span> Einzelorder über ${Math.round(euroVolume).toLocaleString('de-DE')} € registriert!`);
-                }
+            if (!prices[displaySymbol]) prices[displaySymbol] = price;
+            if (!cvdEuro[displaySymbol]) cvdEuro[displaySymbol] = 0;
+            if (!priceHistory[displaySymbol]) priceHistory[displaySymbol] = [];
+            if (!vwapData[displaySymbol]) vwapData[displaySymbol] = { sumVP: 0, sumVol: 0 };
+            if (!whaleSpikes[displaySymbol]) whaleSpikes[displaySymbol] = 0;
 
-                processCloudTradingEngine(symbol, price, euroDelta, euroVolume);
-                broadcastTick(tick);
+            if (euroVolume >= 100000) {
+                whaleSpikes[displaySymbol] = Date.now() + 5000;
+                broadcastLog(`🐳 <span class="text-cyan-400 font-bold">WHALE SWEEP (${displaySymbol}):</span> Einzelorder über ${Math.round(euroVolume).toLocaleString('de-DE')} € registriert!`);
             }
+
+            processCloudTradingEngine(displaySymbol, price, euroDelta, euroVolume);
+            broadcastTick({ ...tick, displaySymbol });
         } catch (e) {}
     });
-    binanceWs.on('close', () => setTimeout(connectBinanceStream, 3000));
-    binanceWs.on('error', () => binanceWs.close());
+
+    binanceWs.on('close', () => setTimeout(connectBinanceStream, 5000));
+    binanceWs.on('error', () => { try { binanceWs.close(); } catch (e) {} });
 }
 
-// 8. ASYNCHRONER SHUTDOWN & SERVER STARTUP
+// 9. SHUTDOWN & SERVER STARTUP
 async function handleShutdown(signal) {
     console.log(`[Server] ${signal} empfangen: Sicherung des KI-Gedächtnisses in MongoDB...`);
     await saveAiMemory();
@@ -755,9 +795,12 @@ async function startServer() {
     }
 
     globalState = getInitialState();
-    connectBinanceStream();
     
-    server.listen(port, () => console.log(`[Server] Multi-Profile Quantum AI Engine v6.3 aktiv auf Port ${port}`));
+    // Initialen Screener-Lauf ausführen und alle 60 Sek. aktualisieren
+    await syncDynamicStream();
+    setInterval(syncDynamicStream, 60000);
+    
+    server.listen(port, () => console.log(`[Server] Multi-Profile Quantum AI Engine v6.3 & Hot-Coin Screener aktiv auf Port ${port}`));
 }
 
 startServer();
