@@ -1,7 +1,7 @@
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
-const fs = require('fs');
+const mongoose = require('mongoose');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -12,7 +12,6 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const clients = new Set();
-const AI_MEMORY_FILE = './ai_memory.json';
 
 // 1. STRATEGIE-PROFILE
 const PROFILES = {
@@ -44,7 +43,7 @@ let macroMatrixState = {
     goldChangePct: 0.15
 };
 
-// 3. KI-GEDÄCHTNIS (REINFORCEMENT LEARNING & MAE/MFE ANALYTICS)
+// 3. KI-GEDÄCHTNIS & MONGODB SCHEMA
 let aiState = {
     confidence: 50,
     consecutiveLosses: 0,
@@ -53,6 +52,14 @@ let aiState = {
     maeHistory: [],                // Maximum Adverse Excursion Historie
     avgWinMae: 0.42                // Durschnittlicher Maximalrücksetzer erfolgreicher Trades
 };
+
+const MemorySchema = new mongoose.Schema({
+    id: { type: String, default: 'ai_state' },
+    aiState: Object,
+    updatedAt: { type: Date, default: Date.now }
+});
+
+const AIMemory = mongoose.model('AIMemory', MemorySchema);
 
 // GLOBAL STATE REFERENZ VORAB DECLARIEREN (STARTUP-CRASH-PROTECTION)
 let globalState = null;
@@ -74,26 +81,30 @@ function calculateHolisticPrognosisScore() {
     return Math.min(98, Math.max(2, Math.round(score)));
 }
 
-function loadAiMemory() {
+async function loadAiMemory() {
     try {
-        if (fs.existsSync(AI_MEMORY_FILE)) {
-            const data = fs.readFileSync(AI_MEMORY_FILE, 'utf8');
-            const savedState = JSON.parse(data);
-            if (savedState.aiState) {
-                aiState = Object.assign(aiState, savedState.aiState);
-                console.log(`[KI-Gedächtnis] Geladen. Conf: ${aiState.confidence}%, MAE-Avg: ${aiState.avgWinMae}%`);
-            }
+        const doc = await AIMemory.findOne({ id: 'ai_state' });
+        if (doc && doc.aiState) {
+            aiState = Object.assign(aiState, doc.aiState);
+            console.log(`🧠 [KI-Gedächtnis] Aus MongoDB geladen. Conf: ${aiState.confidence}%, MAE-Avg: ${aiState.avgWinMae}%`);
         }
     } catch (e) {
-        console.error('⚠️ [KI-Gedächtnis] Fehler beim Laden:', e);
+        console.error('⚠️ [KI-Gedächtnis] Fehler beim DB-Laden:', e.message);
     }
 }
 
-function saveAiMemory() {
+async function saveAiMemory() {
     try {
-        fs.writeFileSync(AI_MEMORY_FILE, JSON.stringify({ aiState, updatedAt: Date.now() }, null, 2));
+        if (mongoose.connection.readyState === 1) {
+            await AIMemory.findOneAndUpdate(
+                { id: 'ai_state' },
+                { aiState: aiState, updatedAt: Date.now() },
+                { upsert: true, new: true }
+            );
+            console.log('💾 [KI-Gedächtnis] Erfolgreich in MongoDB gesichert.');
+        }
     } catch (e) {
-        console.error('⚠️ [KI-Gedächtnis] Fehler beim Speichern:', e);
+        console.error('⚠️ [KI-Gedächtnis] Fehler beim DB-Speichern:', e.message);
     }
 }
 
@@ -218,9 +229,6 @@ function getInitialState() {
         }]
     };
 }
-
-loadAiMemory();
-globalState = getInitialState();
 
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
@@ -718,13 +726,13 @@ function connectBinanceStream() {
     binanceWs.on('error', () => binanceWs.close());
 }
 
-// 8. SHUTDOWN HANDLER
-function handleShutdown(signal) {
-    console.log(`[Server] ${signal} empfangen: Sicherung des KI-Gedächtnisses...`);
-    saveAiMemory();
+// 8. ASYNCHRONER SHUTDOWN & SERVER STARTUP
+async function handleShutdown(signal) {
+    console.log(`[Server] ${signal} empfangen: Sicherung des KI-Gedächtnisses in MongoDB...`);
+    await saveAiMemory();
     const payload = JSON.stringify({ 
         type: 'LOG_EVENT', 
-        log: { time: new Date().toLocaleTimeString('de-DE'), message: '🔄 <span class="text-amber-400 font-bold">CLOUD NEUSTART:</span> Render Sync. Status gesichert.' } 
+        log: { time: new Date().toLocaleTimeString('de-DE'), message: '🔄 <span class="text-amber-400 font-bold">CLOUD NEUSTART:</span> Render Sync. Status in MongoDB gesichert.' } 
     });
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
     setTimeout(() => { process.exit(0); }, 1000);
@@ -733,5 +741,23 @@ function handleShutdown(signal) {
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 process.on('SIGINT', () => handleShutdown('SIGINT'));
 
-connectBinanceStream();
-server.listen(port, () => console.log(`[Server] Multi-Profile Quantum AI Engine v6.3 aktiv auf Port ${port}`));
+async function startServer() {
+    try {
+        if (process.env.MONGODB_URI) {
+            await mongoose.connect(process.env.MONGODB_URI);
+            console.log('✅ Dauerhafte MongoDB-Verbindung hergestellt');
+            await loadAiMemory();
+        } else {
+            console.warn('⚠️ [WARNUNG] MONGODB_URI Umgebungsvariable fehlt! Engine läuft ohne Datenbank-Persistenz.');
+        }
+    } catch (err) {
+        console.error('❌ MongoDB Verbindungsfehler:', err.message);
+    }
+
+    globalState = getInitialState();
+    connectBinanceStream();
+    
+    server.listen(port, () => console.log(`[Server] Multi-Profile Quantum AI Engine v6.3 aktiv auf Port ${port}`));
+}
+
+startServer();
