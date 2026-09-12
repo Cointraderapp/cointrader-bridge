@@ -4,9 +4,42 @@ const WebSocket = require('ws');
 const mongoose = require('mongoose');
 
 const app = express();
+app.use(express.json()); // JSON-Parser Middleware für Pre-Training API Requests
+
 const port = process.env.PORT || 3000;
 
 app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine v6.3 Institutional Telemetry & Quantum AI Edition'));
+
+// ----------------------------------------------------------------
+// PRE-TRAINING ENDPUNKT (HISTORISCHE TRADES EINSPEISEN)
+// ----------------------------------------------------------------
+app.post('/api/pretrain', async (req, res) => {
+    const { trades } = req.body; // Erwartet Array: [{ profit: 25.5, mae: -0.12 }, ...]
+    
+    if (!Array.isArray(trades) || trades.length === 0) {
+        return res.status(400).json({ error: "Ungültiges Format. 'trades' muss ein nicht-leeres Array sein." });
+    }
+
+    let winCount = 0;
+    let lossCount = 0;
+
+    trades.forEach(t => {
+        if (t.profit > 0) winCount++;
+        else lossCount++;
+        trainAgentAfterTrade(t.profit, t.mae);
+    });
+
+    await saveAiMemory();
+    broadcastState();
+    
+    broadcastLog(`🎓 <span class="text-indigo-400 font-bold">PRE-TRAINING ABGESCHLOSSEN:</span> ${trades.length} historische Trades verarbeitet (${winCount} Wins / ${lossCount} Losses). Neue Confidence: ${aiState.confidence}% | MAE-Avg: ${aiState.avgWinMae}%`);
+    
+    res.json({ 
+        success: true, 
+        processedTrades: trades.length, 
+        currentAiState: aiState 
+    });
+});
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -61,7 +94,7 @@ const MemorySchema = new mongoose.Schema({
 
 const AIMemory = mongoose.model('AIMemory', MemorySchema);
 
-// GLOBAL STATE REFERENZ VORAB DECLARIEREN (STARTUP-CRASH-PROTECTION)
+// GLOBAL STATE REFERENZ VORAB DEKLARIEREN (STARTUP-CRASH-PROTECTION)
 let globalState = null;
 
 function calculateHolisticPrognosisScore() {
@@ -258,7 +291,7 @@ async function fetchTopScreenerPairs() {
         filtered.sort((a, b) => {
             const volaA = Math.abs(parseFloat(a.priceChangePercent));
             const volaB = Math.abs(parseFloat(b.priceChangePercent));
-            return volaB - volaA; // Höchste Volatilität zuerst
+            return volaB - volaA; // Höchste Volatilität zuerst (Steigen & Fallen)
         });
 
         const topSymbols = filtered.slice(0, 15).map(t => t.symbol.toLowerCase());
