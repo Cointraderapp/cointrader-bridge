@@ -296,11 +296,12 @@ async function fetchTopScreenerPairs() {
             const volumeEUR = parseFloat(t.quoteVolume) * 0.92;
             const isNotLeveragedToken = !t.symbol.includes('UP') && !t.symbol.includes('DOWN');
             
-            // Schließt exotische/illiquide Nischen-Coins und Non-ASCII Ticker (wie 牛来) aus
-            const isCleanSymbol = !/[^\x00-\x7F]/.test(t.symbol) && !['REZ', 'LSK', 'THE', 'USD1', 'HOLO'].some(b => t.symbol.includes(b));
+            // Blacklist erweitert: Schließt nun auch Stablecoins und Meme-Coins (PUMP, VTHO) aus
+            const blacklist = ['REZ', 'LSK', 'THE', 'USD1', 'HOLO', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'EURUSDT', 'PUMP', 'VTHO'];
+            const isCleanSymbol = !/[^\x00-\x7F]/.test(t.symbol) && !blacklist.some(b => t.symbol.includes(b));
             
-            // 20 Mio. € Limit: Ausreichend Liquidität gegen Slippage, aber breit genug für 15 Märkte
-            return isUSDTorEUR && volumeEUR >= 20000000 && isNotLeveragedToken && isCleanSymbol;
+            // Volumen auf 5 Mio. € gesenkt, um sicher 15 Coins zu finden
+            return isUSDTorEUR && volumeEUR >= 5000000 && isNotLeveragedToken && isCleanSymbol;
         });
 
         filtered.sort((a, b) => {
