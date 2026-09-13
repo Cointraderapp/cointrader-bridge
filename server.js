@@ -300,7 +300,12 @@ async function fetchTopScreenerPairs() {
             return volaB - volaA; 
         });
 
-        const topSymbols = filtered.slice(0, 15).map(t => t.symbol.toLowerCase());
+        let topSymbols = filtered.slice(0, 15).map(t => t.symbol.toLowerCase());
+        
+        // WICHTIG: BTC und ETH fest als Anker verankern, damit das UI nicht einfriert!
+        if (!topSymbols.includes('btcusdt')) topSymbols.unshift('btcusdt');
+        if (!topSymbols.includes('ethusdt')) topSymbols.unshift('ethusdt');
+
         return topSymbols.length >= 5 ? topSymbols : activeSymbols;
     } catch (err) {
         console.error('⚠️ [Screener] Fehler beim Abrufen der Binance-Ticker:', err.message);
@@ -458,14 +463,11 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     // 🛡️ DATA SANITY GUARD: Blockiert kaputte, negative oder genullte Preise sofort!
     if (price <= 0 || isNaN(price)) return; 
     
-    // 🛡️ ANTI-BARCODE GUARD: Verhindert unrealistische Preissprünge (z.B. >10% in Millisekunden)
+    // 🛡️ ANTI-BARCODE GUARD: Verhindert unrealistische Preissprünge
     if (priceHistory[symbol] && priceHistory[symbol].length > 0) {
         const lastValidPrice = priceHistory[symbol][priceHistory[symbol].length - 1];
         const jumpPct = Math.abs((price - lastValidPrice) / lastValidPrice) * 100;
-        if (jumpPct > 10) {
-            // Ignoriert diesen Tick, da er zu 99% ein Datenfehler aus dem Stream ist
-            return; 
-        }
+        if (jumpPct > 10) return; 
     }
 
     prices[symbol] = price;
@@ -742,7 +744,6 @@ function connectBinanceStream() {
         try { binanceWs.close(); } catch (e) {}
     }
 
-    // SAUBERER SINGLE-STREAM: Nur @aggTrade wird abonniert. Keine Ticker-Kollisionen mehr!
     const streamQuery = activeSymbols.map(sym => `${sym}@aggTrade`).join('/');
     binanceWs = new WebSocket(`wss://stream.binance.com:9443/ws/${streamQuery}`);
 
