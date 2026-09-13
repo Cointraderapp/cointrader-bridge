@@ -299,8 +299,8 @@ async function fetchTopScreenerPairs() {
             // Schließt exotische/illiquide Nischen-Coins und Non-ASCII Ticker (wie 牛来) aus
             const isCleanSymbol = !/[^\x00-\x7F]/.test(t.symbol) && !['REZ', 'LSK', 'THE', 'USD1', 'HOLO'].some(b => t.symbol.includes(b));
             
-            // Mindestvolumen auf 100 Mio. € erhöht, um Spreads und Slippage zu minimieren
-            return isUSDTorEUR && volumeEUR >= 100000000 && isNotLeveragedToken && isCleanSymbol;
+            // 20 Mio. € Limit: Ausreichend Liquidität gegen Slippage, aber breit genug für 15 Märkte
+            return isUSDTorEUR && volumeEUR >= 20000000 && isNotLeveragedToken && isCleanSymbol;
         });
 
         filtered.sort((a, b) => {
