@@ -16,7 +16,7 @@ app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine v6.3 Institutio
 // PRE-TRAINING ENDPUNKT (HISTORISCHE TRADES & BIG DATA EINSPEISEN)
 // ----------------------------------------------------------------
 app.post('/api/pretrain', async (req, res) => {
-    const { trades } = req.body; // Erwartet Array: [{ profit: 25.5, mae: -0.12 }, ...]
+    const { trades } = req.body; 
     
     if (!Array.isArray(trades) || trades.length === 0) {
         return res.status(400).json({ error: "Ungültiges Format. 'trades' muss ein nicht-leeres Array sein." });
@@ -31,7 +31,6 @@ app.post('/api/pretrain', async (req, res) => {
         trainAgentAfterTrade(t.profit, t.mae);
     });
 
-    // Bei größeren Datensätzen (≥20 Trades) Confidence exakt auf die reale Win-Rate kalibrieren
     if (trades.length >= 20) {
         const winRate = winCount / trades.length;
         aiState.confidence = Math.min(95, Math.max(20, Math.round(winRate * 100)));
@@ -74,8 +73,8 @@ let telemetryState = {
     socialVelocitySpike: 1.3,
     solarGeomagneticKp: 2.8,
     tideGravitationalVector: 0.82,
-    fundingRatePct: 0.015,         // Squeeze-Radar
-    simulatedSpreadPct: 0.012      // Spread-Expansion Guard
+    fundingRatePct: 0.015,         
+    simulatedSpreadPct: 0.012      
 };
 
 let macroMatrixState = {
@@ -92,8 +91,8 @@ let aiState = {
     consecutiveLosses: 0,
     consecutiveWins: 0,
     marketAggressiveness: 1.0,
-    maeHistory: [],                // Maximum Adverse Excursion Historie
-    avgWinMae: 0.42                // Durschnittlicher Maximalrücksetzer erfolgreicher Trades
+    maeHistory: [],                
+    avgWinMae: 0.42                
 };
 
 const MemorySchema = new mongoose.Schema({
@@ -104,23 +103,18 @@ const MemorySchema = new mongoose.Schema({
 
 const AIMemory = mongoose.model('AIMemory', MemorySchema);
 
-// GLOBAL STATE REFERENZ VORAB DEKLARIEREN (STARTUP-CRASH-PROTECTION)
 let globalState = null;
 
 function calculateHolisticPrognosisScore() {
     let score = 50;
-
     if (macroMatrixState.dxyChangePct < 0) score += 10;
     if (macroMatrixState.nasdaq100ChangePct > 0) score += 15;
     if (macroMatrixState.sp500ChangePct > 0) score += 10;
     if (macroMatrixState.goldChangePct > 0) score += 5;
-
     if (telemetryState.ethNetflow < 0) score += 5;
     if (telemetryState.orderbookImbalancePct > 0) score += 5;
-
     let aiFactor = (aiState.confidence - 50) * 0.3;
     score += aiFactor;
-
     return Math.min(98, Math.max(2, Math.round(score)));
 }
 
@@ -151,7 +145,7 @@ async function saveAiMemory() {
     }
 }
 
-// INSTITUTIONELLES KELLY-KRITERIUM FÜR DYNAMISCHE POSITIONSGRÖSSEN
+// INSTITUTIONELLES KELLY-KRITERIUM
 function calculateKellyMargin() {
     const currentBalance = (globalState && globalState.balance) ? globalState.balance : 20000;
     const tradesCount = (globalState && globalState.tradesCount) ? globalState.tradesCount : 0;
@@ -189,7 +183,7 @@ function trainAgentAfterTrade(netProfit, tradeMae) {
         if (tradeMae !== undefined && tradeMae < 0) {
             const winMae = Math.abs(tradeMae);
             aiState.maeHistory.push(winMae);
-            if (aiState.maeHistory.length > 1000) aiState.maeHistory.shift(); // Erweitert auf 1.000 Trades Speicher
+            if (aiState.maeHistory.length > 1000) aiState.maeHistory.shift();
             aiState.avgWinMae = parseFloat((aiState.maeHistory.reduce((a, b) => a + b, 0) / aiState.maeHistory.length).toFixed(2));
         }
 
@@ -274,14 +268,12 @@ function getInitialState() {
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
 
-// DYNAMISCHE STRUKTUREN FÜR JEDEN AKTIVEN COIN
 const prices = {};
 const cvdEuro = {};
 const priceHistory = {};
 const whaleSpikes = {};
 const vwapData = {};
 
-// 4. DYNAMIC MARKET SCREENER MODULE (TOP 15 HOT COINS - GEHÄRTETE VERSION)
 let activeSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'dogeusdt'];
 let binanceWs = null;
 
@@ -296,18 +288,16 @@ async function fetchTopScreenerPairs() {
             const volumeEUR = parseFloat(t.quoteVolume) * 0.92;
             const isNotLeveragedToken = !t.symbol.includes('UP') && !t.symbol.includes('DOWN');
             
-            // Blacklist erweitert: Schließt nun auch Stablecoins und Meme-Coins (PUMP, VTHO) aus
             const blacklist = ['REZ', 'LSK', 'THE', 'USD1', 'HOLO', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'EURUSDT', 'PUMP', 'VTHO'];
             const isCleanSymbol = !/[^\x00-\x7F]/.test(t.symbol) && !blacklist.some(b => t.symbol.includes(b));
             
-            // Volumen auf 5 Mio. € gesenkt, um sicher 15 Coins zu finden
             return isUSDTorEUR && volumeEUR >= 5000000 && isNotLeveragedToken && isCleanSymbol;
         });
 
         filtered.sort((a, b) => {
             const volaA = Math.abs(parseFloat(a.priceChangePercent));
             const volaB = Math.abs(parseFloat(b.priceChangePercent));
-            return volaB - volaA; // Höchste Volatilität zuerst (Steigen & Fallen)
+            return volaB - volaA; 
         });
 
         const topSymbols = filtered.slice(0, 15).map(t => t.symbol.toLowerCase());
@@ -329,7 +319,6 @@ async function syncDynamicStream() {
     }
 }
 
-// 5. INSTITUTIONELLE SCHUTZ-GATEKEEPER & SENSORDETEKTOREN
 function detectIcebergAbsorption(symbol, currentPrice) {
     const history = priceHistory[symbol];
     if (!history || history.length < 15) return false;
@@ -357,14 +346,8 @@ function isNewsBlackoutActive() {
 }
 
 function evaluateStrictTelemetryGates(symbol, posType) {
-    if (isNewsBlackoutActive()) {
-        broadcastLog(`📰 <span class="text-amber-400 font-bold">NEWS-LOCKOUT:</span> Makro-Event Fenster aktiv. Keine Ordereingabe.`);
-        return false;
-    }
-
-    if (detectIcebergAbsorption(symbol, prices[symbol] || 100)) {
-        return false;
-    }
+    if (isNewsBlackoutActive()) return false;
+    if (detectIcebergAbsorption(symbol, prices[symbol] || 100)) return false;
 
     const history = priceHistory[symbol];
     if (history && history.length >= 24) {
@@ -375,53 +358,21 @@ function evaluateStrictTelemetryGates(symbol, posType) {
         const twoMinVolaPct = ((maxP - minP) / currentP) * 100;
 
         if (twoMinVolaPct < 0.12) {
-            broadcastLog(`💤 <span class="text-slate-400 font-bold">VOLATILITÄTS-BLOCK (${symbol}):</span> Markt zu träge (Range: ${twoMinVolaPct.toFixed(2)}%). Timeout-Gefahr.`);
             return false;
         }
     }
 
-    if (telemetryState.simulatedSpreadPct > 0.045) {
-        broadcastLog(`⚡ <span class="text-rose-400 font-bold">SPREAD GUARD (${symbol}):</span> Liquidität dünn (Spread ${telemetryState.simulatedSpreadPct.toFixed(3)}%). Trade abgebrochen.`);
-        return false;
-    }
-
-    if (posType === 'LONG' && telemetryState.fundingRatePct > 0.05) {
-        broadcastLog(`🔥 <span class="text-rose-400 font-bold">SQUEEZE-RADAR (${symbol}):</span> Longs überhitzt (Funding Rate ${telemetryState.fundingRatePct}%). Long geblockt.`);
-        return false;
-    }
-
-    if (telemetryState.mempoolGwei > 85) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Mempool Gas zu hoch (${telemetryState.mempoolGwei} Gwei).`);
-        return false;
-    }
-    if (posType === 'LONG' && telemetryState.ethNetflow > 1200) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Inflow-Spike (+${telemetryState.ethNetflow} ETH).`);
-        return false;
-    }
-    if (posType === 'SHORT' && telemetryState.ethNetflow < -3000) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Akkumulation (-${Math.abs(telemetryState.ethNetflow)} ETH).`);
-        return false;
-    }
-    if (posType === 'LONG' && telemetryState.orderbookImbalancePct < -12.0) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Asks-Übermacht im Buch (${telemetryState.orderbookImbalancePct}%).`);
-        return false;
-    }
-    if (posType === 'SHORT' && telemetryState.orderbookImbalancePct > 12.0) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Starke Bids-Übermacht im Buch (${telemetryState.orderbookImbalancePct}%).`);
-        return false;
-    }
-    if (posType === 'LONG' && telemetryState.fearAndGreed > 85) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Gier (${telemetryState.fearAndGreed}). Top-Schutz.`);
-        return false;
-    }
-    if (posType === 'SHORT' && telemetryState.fearAndGreed < 15) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Extreme Angst (${telemetryState.fearAndGreed}). Boden-Schutz.`);
-        return false;
-    }
-    if (telemetryState.solarGeomagneticKp >= 6.5) {
-        broadcastLog(`🛰️ <span class="text-rose-400 font-bold">TELEMETRIE-BLOCK (${symbol}):</span> Solarer Sturm (Kp ${telemetryState.solarGeomagneticKp}).`);
-        return false;
-    }
+    if (telemetryState.simulatedSpreadPct > 0.045) return false;
+    if (posType === 'LONG' && telemetryState.fundingRatePct > 0.05) return false;
+    if (telemetryState.mempoolGwei > 85) return false;
+    if (posType === 'LONG' && telemetryState.ethNetflow > 1200) return false;
+    if (posType === 'SHORT' && telemetryState.ethNetflow < -3000) return false;
+    if (posType === 'LONG' && telemetryState.orderbookImbalancePct < -12.0) return false;
+    if (posType === 'SHORT' && telemetryState.orderbookImbalancePct > 12.0) return false;
+    if (posType === 'LONG' && telemetryState.fearAndGreed > 85) return false;
+    if (posType === 'SHORT' && telemetryState.fearAndGreed < 15) return false;
+    if (telemetryState.solarGeomagneticKp >= 6.5) return false;
+    
     return true;
 }
 
@@ -449,10 +400,8 @@ function getVWAP(symbol, price, euroVolume) {
 
 function check5MinTrend(symbol, currentPrice, type, profile) {
     if (!profile.use5MinTrend) return true;
-
     const history = priceHistory[symbol];
     if (!history || history.length < 30) return true;
-
     const sampleSize = Math.min(20, Math.floor(history.length / 3));
     const oldPriceAvg = history.slice(0, sampleSize).reduce((a, b) => a + b, 0) / sampleSize;
 
@@ -504,8 +453,21 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 6. TRADING ENGINE KERN WITH ANTI-STOP-HUNT & PARABOLIC TRAILING ENGINE
+// 6. TRADING ENGINE KERN WITH DATA SANITY FIREWALL
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
+    // 🛡️ DATA SANITY GUARD: Blockiert kaputte, negative oder genullte Preise sofort!
+    if (price <= 0 || isNaN(price)) return; 
+    
+    // 🛡️ ANTI-BARCODE GUARD: Verhindert unrealistische Preissprünge (z.B. >10% in Millisekunden)
+    if (priceHistory[symbol] && priceHistory[symbol].length > 0) {
+        const lastValidPrice = priceHistory[symbol][priceHistory[symbol].length - 1];
+        const jumpPct = Math.abs((price - lastValidPrice) / lastValidPrice) * 100;
+        if (jumpPct > 10) {
+            // Ignoriert diesen Tick, da er zu 99% ein Datenfehler aus dem Stream ist
+            return; 
+        }
+    }
+
     prices[symbol] = price;
     cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
     const now = Date.now();
@@ -551,7 +513,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
         const currentCvd = cvdEuro[symbol] || 0;
 
-        // Break-Even Auslöser auf 0.40% erhöht, um Gewinne über den Taker-Gebühren abzusichern
         if (pos.peakProfitPct >= 0.40 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.20;
@@ -781,25 +742,18 @@ function connectBinanceStream() {
         try { binanceWs.close(); } catch (e) {}
     }
 
-    // NEU: Abonniere sowohl @aggTrade (für KI) als auch @ticker (für %-Anzeige im Dashboard)
-    const streamQuery = activeSymbols.map(sym => `${sym}@aggTrade/${sym}@ticker`).join('/');
+    // SAUBERER SINGLE-STREAM: Nur @aggTrade wird abonniert. Keine Ticker-Kollisionen mehr!
+    const streamQuery = activeSymbols.map(sym => `${sym}@aggTrade`).join('/');
     binanceWs = new WebSocket(`wss://stream.binance.com:9443/ws/${streamQuery}`);
 
     binanceWs.on('message', (data) => {
         try {
             const tick = JSON.parse(data);
             const rawSymbol = tick.s;
-            if (!rawSymbol) return; // Leere Nachrichten filtern
+            if (!rawSymbol) return; 
             
             const displaySymbol = rawSymbol.endsWith('USDT') ? rawSymbol.replace('USDT', 'EUR') : rawSymbol;
             
-            // 1. TICKER STREAM (24h Prozent-Daten für das Frontend Radar)
-            if (tick.e === '24hrTicker') {
-                broadcastTick({ ...tick, displaySymbol });
-                return; // Engine überspringen, da keine Trade-Ausführung
-            }
-
-            // 2. AGGTRADE STREAM (Live-Volumen & Preis für die KI-Engine)
             if (tick.e === 'aggTrade') {
                 const rawPrice = parseFloat(tick.p);
                 const price = rawSymbol.endsWith('USDT') ? rawPrice * 0.92 : rawPrice;
@@ -858,7 +812,6 @@ async function startServer() {
 
     globalState = getInitialState();
     
-    // Initialen Screener-Lauf ausführen und alle 60 Sek. aktualisieren
     await syncDynamicStream();
     setInterval(syncDynamicStream, 60000);
     
