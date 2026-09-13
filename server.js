@@ -781,34 +781,46 @@ function connectBinanceStream() {
         try { binanceWs.close(); } catch (e) {}
     }
 
-    const streamQuery = activeSymbols.map(sym => `${sym}@aggTrade`).join('/');
+    // NEU: Abonniere sowohl @aggTrade (für KI) als auch @ticker (für %-Anzeige im Dashboard)
+    const streamQuery = activeSymbols.map(sym => `${sym}@aggTrade/${sym}@ticker`).join('/');
     binanceWs = new WebSocket(`wss://stream.binance.com:9443/ws/${streamQuery}`);
 
     binanceWs.on('message', (data) => {
         try {
             const tick = JSON.parse(data);
             const rawSymbol = tick.s;
+            if (!rawSymbol) return; // Leere Nachrichten filtern
+            
             const displaySymbol = rawSymbol.endsWith('USDT') ? rawSymbol.replace('USDT', 'EUR') : rawSymbol;
             
-            const rawPrice = parseFloat(tick.p);
-            const price = rawSymbol.endsWith('USDT') ? rawPrice * 0.92 : rawPrice;
-            const quantity = parseFloat(tick.q);
-            const euroVolume = quantity * price;
-            const euroDelta = tick.m ? -euroVolume : euroVolume;
-
-            if (!prices[displaySymbol]) prices[displaySymbol] = price;
-            if (!cvdEuro[displaySymbol]) cvdEuro[displaySymbol] = 0;
-            if (!priceHistory[displaySymbol]) priceHistory[displaySymbol] = [];
-            if (!vwapData[displaySymbol]) vwapData[displaySymbol] = { sumVP: 0, sumVol: 0 };
-            if (!whaleSpikes[displaySymbol]) whaleSpikes[displaySymbol] = 0;
-
-            if (euroVolume >= 100000) {
-                whaleSpikes[displaySymbol] = Date.now() + 5000;
-                broadcastLog(`🐳 <span class="text-cyan-400 font-bold">WHALE SWEEP (${displaySymbol}):</span> Einzelorder über ${Math.round(euroVolume).toLocaleString('de-DE')} € registriert!`);
+            // 1. TICKER STREAM (24h Prozent-Daten für das Frontend Radar)
+            if (tick.e === '24hrTicker') {
+                broadcastTick({ ...tick, displaySymbol });
+                return; // Engine überspringen, da keine Trade-Ausführung
             }
 
-            processCloudTradingEngine(displaySymbol, price, euroDelta, euroVolume);
-            broadcastTick({ ...tick, displaySymbol });
+            // 2. AGGTRADE STREAM (Live-Volumen & Preis für die KI-Engine)
+            if (tick.e === 'aggTrade') {
+                const rawPrice = parseFloat(tick.p);
+                const price = rawSymbol.endsWith('USDT') ? rawPrice * 0.92 : rawPrice;
+                const quantity = parseFloat(tick.q);
+                const euroVolume = quantity * price;
+                const euroDelta = tick.m ? -euroVolume : euroVolume;
+
+                if (!prices[displaySymbol]) prices[displaySymbol] = price;
+                if (!cvdEuro[displaySymbol]) cvdEuro[displaySymbol] = 0;
+                if (!priceHistory[displaySymbol]) priceHistory[displaySymbol] = [];
+                if (!vwapData[displaySymbol]) vwapData[displaySymbol] = { sumVP: 0, sumVol: 0 };
+                if (!whaleSpikes[displaySymbol]) whaleSpikes[displaySymbol] = 0;
+
+                if (euroVolume >= 100000) {
+                    whaleSpikes[displaySymbol] = Date.now() + 5000;
+                    broadcastLog(`🐳 <span class="text-cyan-400 font-bold">WHALE SWEEP (${displaySymbol}):</span> Einzelorder über ${Math.round(euroVolume).toLocaleString('de-DE')} € registriert!`);
+                }
+
+                processCloudTradingEngine(displaySymbol, price, euroDelta, euroVolume);
+                broadcastTick({ ...tick, displaySymbol });
+            }
         } catch (e) {}
     });
 
