@@ -281,7 +281,7 @@ const priceHistory = {};
 const whaleSpikes = {};
 const vwapData = {};
 
-// 4. DYNAMIC MARKET SCREENER MODULE (TOP 15 HOT COINS)
+// 4. DYNAMIC MARKET SCREENER MODULE (TOP 15 HOT COINS - GEHÄRTETE VERSION)
 let activeSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'dogeusdt'];
 let binanceWs = null;
 
@@ -295,7 +295,12 @@ async function fetchTopScreenerPairs() {
             const isUSDTorEUR = t.symbol.endsWith('USDT') || t.symbol.endsWith('EUR');
             const volumeEUR = parseFloat(t.quoteVolume) * 0.92;
             const isNotLeveragedToken = !t.symbol.includes('UP') && !t.symbol.includes('DOWN');
-            return isUSDTorEUR && volumeEUR >= 30000000 && isNotLeveragedToken; // > 30 Mio. € Volumen
+            
+            // Schließt exotische/illiquide Nischen-Coins und Non-ASCII Ticker (wie 牛来) aus
+            const isCleanSymbol = !/[^\x00-\x7F]/.test(t.symbol) && !['REZ', 'LSK', 'THE', 'USD1', 'HOLO'].some(b => t.symbol.includes(b));
+            
+            // Mindestvolumen auf 100 Mio. € erhöht, um Spreads und Slippage zu minimieren
+            return isUSDTorEUR && volumeEUR >= 100000000 && isNotLeveragedToken && isCleanSymbol;
         });
 
         filtered.sort((a, b) => {
@@ -545,21 +550,22 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
         const currentCvd = cvdEuro[symbol] || 0;
 
-        if (pos.peakProfitPct >= 0.25 && !pos.breakEvenTriggered) {
+        // Break-Even Auslöser auf 0.40% erhöht, um Gewinne über den Taker-Gebühren abzusichern
+        if (pos.peakProfitPct >= 0.40 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
-            pos.dynamicSLPct = -0.15;
-            broadcastLog(`🛡️ <span class="text-indigo-400 font-bold">BREAK-EVEN:</span> SL auf +0.15% gesichert.`);
+            pos.dynamicSLPct = -0.20;
+            broadcastLog(`🛡️ <span class="text-indigo-400 font-bold">BREAK-EVEN:</span> SL auf +0.20% gesichert.`);
             broadcastState();
         }
 
         if (pos.breakEvenTriggered) {
-            let trailingDistance = 0.15;
+            let trailingDistance = 0.20;
             if (priceChangePct >= 2.00) trailingDistance = 0.45;
             else if (priceChangePct >= 1.00) trailingDistance = 0.30;
-            else if (priceChangePct >= 0.50) trailingDistance = 0.20;
+            else if (priceChangePct >= 0.60) trailingDistance = 0.25;
 
             const isCvdReversing = (pos.type === 'LONG' && currentCvd < 0) || (pos.type === 'SHORT' && currentCvd > 0);
-            if (priceChangePct >= 0.70 && isCvdReversing) trailingDistance = 0.08;
+            if (priceChangePct >= 0.70 && isCvdReversing) trailingDistance = 0.10;
 
             let targetSL = priceChangePct - trailingDistance;
 
