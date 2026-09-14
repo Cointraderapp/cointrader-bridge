@@ -37,6 +37,7 @@ app.post('/api/pretrain', async (req, res) => {
     }
 
     await saveAiMemory();
+    await saveGlobalState();
     broadcastState();
     
     const winRatePct = ((winCount / trades.length) * 100).toFixed(1);
@@ -85,7 +86,7 @@ let macroMatrixState = {
     goldChangePct: 0.15
 };
 
-// 3. KI-GEDÄCHTNIS & MONGODB SCHEMA
+// 3. KI-GEDÄCHTNIS & MONGODB SCHEMAS FOR PERSISTENCE
 let aiState = {
     confidence: 50,
     consecutiveLosses: 0,
@@ -101,7 +102,14 @@ const MemorySchema = new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }
 });
 
+const GlobalStateSchema = new mongoose.Schema({
+    id: { type: String, default: 'global_state' },
+    stateData: Object,
+    updatedAt: { type: Date, default: Date.now }
+});
+
 const AIMemory = mongoose.model('AIMemory', MemorySchema);
+const GlobalStateMemory = mongoose.model('GlobalStateMemory', GlobalStateSchema);
 
 let globalState = null;
 
@@ -142,6 +150,34 @@ async function saveAiMemory() {
         }
     } catch (e) {
         console.error('⚠️ [KI-Gedächtnis] Fehler beim DB-Speichern:', e.message);
+    }
+}
+
+async function loadGlobalState() {
+    try {
+        const doc = await GlobalStateMemory.findOne({ id: 'global_state' });
+        if (doc && doc.stateData) {
+            globalState = doc.stateData;
+            console.log(`💾 [Depot-Speicher] Kontostand aus MongoDB wiederhergestellt: ${globalState.balance.toFixed(2)} € (${globalState.tradesCount} Trades)`);
+            return true;
+        }
+    } catch (e) {
+        console.error('⚠️ [Depot-Speicher] Fehler beim Laden aus DB:', e.message);
+    }
+    return false;
+}
+
+async function saveGlobalState() {
+    try {
+        if (mongoose.connection.readyState === 1 && globalState) {
+            await GlobalStateMemory.findOneAndUpdate(
+                { id: 'global_state' },
+                { stateData: globalState, updatedAt: Date.now() },
+                { upsert: true, new: true }
+            );
+        }
+    } catch (e) {
+        console.error('⚠️ [Depot-Speicher] Fehler beim DB-Speichern:', e.message);
     }
 }
 
@@ -302,7 +338,6 @@ async function fetchTopScreenerPairs() {
 
         let topSymbols = filtered.slice(0, 15).map(t => t.symbol.toLowerCase());
         
-        // WICHTIG: BTC und ETH fest als Anker verankern, damit das UI nicht einfriert!
         if (!topSymbols.includes('btcusdt')) topSymbols.unshift('btcusdt');
         if (!topSymbols.includes('ethusdt')) topSymbols.unshift('ethusdt');
 
@@ -389,6 +424,7 @@ function checkDailyReset() {
             globalState.dailyPnL = 0;
             globalState.dailyHardLockActive = false;
             broadcastLog(`🌅 <span class="text-cyan-400 font-bold">TAGES-RESET (00:00 UTC):</span> Daily Limit erneuert. Startkapital: ${globalState.balance.toFixed(2)} €`);
+            saveGlobalState();
             broadcastState();
         }
     }
@@ -458,12 +494,10 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 6. TRADING ENGINE KERN WITH DATA SANITY FIREWALL
+// 6. TRADING ENGINE KERN WITH DATA SANITY FIREWALL & MONGODB STATE SAVING
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
-    // 🛡️ DATA SANITY GUARD: Blockiert kaputte, negative oder genullte Preise sofort!
     if (price <= 0 || isNaN(price)) return; 
     
-    // 🛡️ ANTI-BARCODE GUARD: Verhindert unrealistische Preissprünge
     if (priceHistory[symbol] && priceHistory[symbol].length > 0) {
         const lastValidPrice = priceHistory[symbol][priceHistory[symbol].length - 1];
         const jumpPct = Math.abs((price - lastValidPrice) / lastValidPrice) * 100;
@@ -519,6 +553,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.20;
             broadcastLog(`🛡️ <span class="text-indigo-400 font-bold">BREAK-EVEN:</span> SL auf +0.20% gesichert.`);
+            saveGlobalState();
             broadcastState();
         }
 
@@ -536,6 +571,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             if (targetSL > -pos.dynamicSLPct + 0.03) {
                 pos.dynamicSLPct = -targetSL;
                 broadcastLog(`🚀 <span class="text-emerald-400 font-bold">PARABOLIC TRAILING:</span> Peak +${priceChangePct.toFixed(2)}% | SL +${targetSL.toFixed(2)}% (Abstand: ${trailingDistance.toFixed(2)}%)`);
+                saveGlobalState();
                 broadcastState();
             }
         }
@@ -624,6 +660,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             globalState.transactions.push(newTx);
             
             broadcastLog(`🤖 <span class="${statusColor} font-bold">${isWin ? '🎯 TAKE-PROFIT' : '🛑 STOP-LOSS / TIMEOUT'} (${symbol}):</span> Closed @ ${price.toFixed(4)} € | Netto: <span class="${statusColor}">${isWin ? '+' : ''}${netProfit.toFixed(2)} €</span>`);
+            saveGlobalState();
             broadcastState();
         }
     } 
@@ -675,6 +712,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
             const pctOfBalance = ((currentProfile.margin / globalState.balance) * 100).toFixed(1);
             broadcastLog(`🤖 ${icon} <span class="${color} font-bold">${currentProfile.name} ORDER (${symbol} ${currentProfile.leverage}x):</span> ${posType} Einsatz ${currentProfile.margin}€ (${pctOfBalance}% des Depots) @ ${price.toFixed(4)} €`);
+            saveGlobalState();
             broadcastState();
         }
     }
@@ -685,7 +723,7 @@ wss.on('connection', (ws) => {
     clients.add(ws);
     ws.send(JSON.stringify({ type: 'STATE_UPDATE', state: globalState }));
 
-    ws.on('message', (message) => {
+    ws.on('message', async (message) => {
         try {
             const parsed = JSON.parse(message);
             if (parsed.type === 'SET_PROFILE' && parsed.profileId && PROFILES[parsed.profileId]) {
@@ -696,6 +734,7 @@ wss.on('connection', (ws) => {
                 globalState.tp = activeProf.tp;
                 globalState.sl = activeProf.sl;
                 broadcastLog(`⚙️ <span class="text-indigo-400 font-bold">PROFIL GEWECHSELT:</span> ${activeProf.name}`);
+                await saveGlobalState();
                 broadcastState();
                 return;
             }
@@ -707,6 +746,7 @@ wss.on('connection', (ws) => {
                 globalState.profileId = currentProfile;
                 consecutiveLosses = 0;
                 broadcastLog(`🔄 <span class="text-indigo-400 font-bold">SYSTEM RESET:</span> Depot zurückgesetzt.`);
+                await saveGlobalState();
                 broadcastState();
                 return;
             }
@@ -716,6 +756,7 @@ wss.on('connection', (ws) => {
                 if (parsed.data.tp !== undefined && globalState.profileId !== 'AUTO_KI') globalState.tp = parsed.data.tp;
                 if (parsed.data.sl !== undefined && globalState.profileId !== 'AUTO_KI') globalState.sl = parsed.data.sl;
                 if (parsed.data.agentActive !== undefined) globalState.agentActive = parsed.data.agentActive;
+                await saveGlobalState();
                 broadcastState();
                 return;
             }
@@ -729,6 +770,7 @@ wss.on('connection', (ws) => {
                     globalState.dailyStartBalance -= parsed.tx.eur;
                 }
                 broadcastLog(`💶 <span class="text-emerald-400 font-bold">DEPOSIT/WITHDRAW:</span> ${parsed.tx.type} über ${parsed.tx.eur} €.`);
+                await saveGlobalState();
                 broadcastState();
                 return;
             }
@@ -785,8 +827,9 @@ function connectBinanceStream() {
 
 // 9. SHUTDOWN & SERVER STARTUP
 async function handleShutdown(signal) {
-    console.log(`[Server] ${signal} empfangen: Sicherung des KI-Gedächtnisses in MongoDB...`);
+    console.log(`[Server] ${signal} empfangen: Sicherung des KI-Gedächtnisses und des Depots in MongoDB...`);
     await saveAiMemory();
+    await saveGlobalState();
     const payload = JSON.stringify({ 
         type: 'LOG_EVENT', 
         log: { time: new Date().toLocaleTimeString('de-DE'), message: '🔄 <span class="text-amber-400 font-bold">CLOUD NEUSTART:</span> Render Sync. Status in MongoDB gesichert.' } 
@@ -804,19 +847,24 @@ async function startServer() {
             await mongoose.connect(process.env.MONGODB_URI);
             console.log('✅ Dauerhafte MongoDB-Verbindung hergestellt');
             await loadAiMemory();
+            const stateLoaded = await loadGlobalState();
+            if (!stateLoaded) {
+                globalState = getInitialState();
+                await saveGlobalState();
+            }
         } else {
             console.warn('⚠️ [WARNUNG] MONGODB_URI Umgebungsvariable fehlt! Engine läuft ohne Datenbank-Persistenz.');
+            globalState = getInitialState();
         }
     } catch (err) {
         console.error('❌ MongoDB Verbindungsfehler:', err.message);
+        globalState = getInitialState();
     }
 
-    globalState = getInitialState();
-    
     await syncDynamicStream();
     setInterval(syncDynamicStream, 60000);
     
-    server.listen(port, () => console.log(`[Server] Multi-Profile Quantum AI Engine v6.3 & Hot-Coin Screener aktiv auf Port ${port}`));
+    server.listen(port, () => console.log(`[Server] Multi-Profile Quantum AI Engine v6.3 & Persistent Depot aktiv auf Port ${port}`));
 }
 
 startServer();
