@@ -13,7 +13,7 @@ const port = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('OK - Cointrader 24/7 Engine v6.3 Institutional Telemetry & Quantum AI Edition'));
 
 // ----------------------------------------------------------------
-// PRE-TRAINING ENDPUNKT (HISTORISCHE TRADES & BIG DATA EINSPEISEN)
+// PRE-TRAINING ENDPUNKT (HISTORISCHE TRADES EINSPEISEN)
 // ----------------------------------------------------------------
 app.post('/api/pretrain', async (req, res) => {
     const { trades } = req.body; 
@@ -302,7 +302,7 @@ function getInitialState() {
 
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
-const symbolCooldown = {}; // COOLDOWN PRO EINZELNEM COIN
+const symbolCooldown = {}; 
 
 const prices = {};
 const cvdEuro = {};
@@ -320,7 +320,6 @@ async function fetchTopScreenerPairs() {
         const tickers = await response.json();
 
         const filtered = tickers.filter(t => {
-            // AUSSCHLIESSLICH USDT-PAARE NUTZEN (Verhindert EUR-Doppelstreaming Kollisionen)
             const isUSDT = t.symbol.endsWith('USDT');
             const volumeEUR = parseFloat(t.quoteVolume) * 0.92;
             const isNotLeveragedToken = !t.symbol.includes('UP') && !t.symbol.includes('DOWN');
@@ -647,12 +646,12 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             symbolCooldown[symbol] = now + cooldownTimeMs;
             tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000);
 
-            // CVD FÜR DIESEN COIN NULLEN (VERHINDERT FEHLEINSTIEGE IN FALLENDE MESSER)
+            // CVD FÜR DIESEN COIN NULLEN
             cvdEuro[symbol] = 0;
 
-            let exitReason = `🤖 ${currentProfile.name} ${symbol} ${pos.type}`;
-            if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${timeInTradeSec}s)`;
-            else if (pos.breakEvenTriggered) exitReason = `🛡️ Trailing/Break-Even Ausstieg`;
+            // FIX: EXPLIZITER COIN-NAME VOLLSTÄNDIG AN ERSTER STELLE
+            let exitDetail = pos.breakEvenTriggered ? '🛡️ Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Momentum-Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
+            const noteText = `${symbol} ${pos.type} | ${exitDetail} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`;
 
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
 
@@ -662,7 +661,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 eur: Math.abs(netProfit),
                 timestamp: Date.now(),
                 entryPrice: price,
-                note: `${exitReason} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`
+                note: noteText
             };
             globalState.transactions.push(newTx);
             
@@ -805,7 +804,6 @@ function connectBinanceStream() {
             const rawSymbol = tick.s;
             if (!rawSymbol) return; 
             
-            // Einheitliches Mappen aller USDT-Märkte zu EUR für das Dashboard
             const displaySymbol = rawSymbol.endsWith('USDT') ? rawSymbol.replace('USDT', 'EUR') : rawSymbol;
             
             if (tick.e === 'aggTrade') {
