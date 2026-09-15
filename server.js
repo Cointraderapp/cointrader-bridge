@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 const path = require('path');
 
 const app = express();
-app.use(express.json()); // JSON-Parser Middleware für Pre-Training API Requests
+app.use(express.json());
 app.use(express.static(__dirname));
 
 const port = process.env.PORT || 3000;
@@ -86,7 +86,7 @@ let macroMatrixState = {
     goldChangePct: 0.15
 };
 
-// 3. KI-GEDÄCHTNIS & MONGODB SCHEMAS FOR PERSISTENCE
+// 3. KI-GEDÄCHTNIS & MONGODB SCHEMAS
 let aiState = {
     confidence: 50,
     consecutiveLosses: 0,
@@ -181,7 +181,6 @@ async function saveGlobalState() {
     }
 }
 
-// INSTITUTIONELLES KELLY-KRITERIUM
 function calculateKellyMargin() {
     const currentBalance = (globalState && globalState.balance) ? globalState.balance : 20000;
     const tradesCount = (globalState && globalState.tradesCount) ? globalState.tradesCount : 0;
@@ -303,6 +302,7 @@ function getInitialState() {
 
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
+const symbolCooldown = {}; // COOLDOWN PRO EINZELNEM COIN
 
 const prices = {};
 const cvdEuro = {};
@@ -320,14 +320,15 @@ async function fetchTopScreenerPairs() {
         const tickers = await response.json();
 
         const filtered = tickers.filter(t => {
-            const isUSDTorEUR = t.symbol.endsWith('USDT') || t.symbol.endsWith('EUR');
+            // AUSSCHLIESSLICH USDT-PAARE NUTZEN (Verhindert EUR-Doppelstreaming Kollisionen)
+            const isUSDT = t.symbol.endsWith('USDT');
             const volumeEUR = parseFloat(t.quoteVolume) * 0.92;
             const isNotLeveragedToken = !t.symbol.includes('UP') && !t.symbol.includes('DOWN');
             
-            const blacklist = ['REZ', 'LSK', 'THE', 'USD1', 'HOLO', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'EURUSDT', 'PUMP', 'VTHO'];
+            const blacklist = ['REZ', 'LSK', 'THE', 'USD1', 'HOLO', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'EUR', 'PUMP', 'VTHO'];
             const isCleanSymbol = !/[^\x00-\x7F]/.test(t.symbol) && !blacklist.some(b => t.symbol.includes(b));
             
-            return isUSDTorEUR && volumeEUR >= 5000000 && isNotLeveragedToken && isCleanSymbol;
+            return isUSDT && volumeEUR >= 5000000 && isNotLeveragedToken && isCleanSymbol;
         });
 
         filtered.sort((a, b) => {
@@ -494,7 +495,7 @@ function broadcastLog(message) {
     clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-// 6. TRADING ENGINE KERN WITH DATA SANITY FIREWALL & MONGODB STATE SAVING
+// 6. TRADING ENGINE KERN
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     if (price <= 0 || isNaN(price)) return; 
     
@@ -641,7 +642,13 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 trainAgentAfterTrade(netProfit, pos.mae);
             }
 
-            tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000 * (consecutiveLosses >= 2 ? 1.5 : 1));
+            // ANTI-OVERTRADING FIX: Symbol-spezifische Cooldown-Sperre (3 bis 5 Minuten)
+            const cooldownTimeMs = isWin ? 30000 : (consecutiveLosses >= 2 ? 300000 : 180000);
+            symbolCooldown[symbol] = now + cooldownTimeMs;
+            tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000);
+
+            // CVD FÜR DIESEN COIN NULLEN (VERHINDERT FEHLEINSTIEGE IN FALLENDE MESSER)
+            cvdEuro[symbol] = 0;
 
             let exitReason = `🤖 ${currentProfile.name} ${symbol} ${pos.type}`;
             if (timeoutTriggered) exitReason = `⏱️ Momentum-Timeout (${timeInTradeSec}s)`;
@@ -667,6 +674,9 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     else if (!globalState.inPosition && !isChopMarket && now > tradeCooldownUntil && globalState.balance >= currentProfile.margin) {
         
         if (globalState.dailyHardLockActive) return;
+
+        // PRÜFEN OB COIN IM SYMBOL-COOLDOWN IST
+        if (symbolCooldown[symbol] && now < symbolCooldown[symbol]) return;
 
         const sessionInfo = getSessionMultiplier();
         const currentCvd = cvdEuro[symbol] || 0;
@@ -795,6 +805,7 @@ function connectBinanceStream() {
             const rawSymbol = tick.s;
             if (!rawSymbol) return; 
             
+            // Einheitliches Mappen aller USDT-Märkte zu EUR für das Dashboard
             const displaySymbol = rawSymbol.endsWith('USDT') ? rawSymbol.replace('USDT', 'EUR') : rawSymbol;
             
             if (tick.e === 'aggTrade') {
