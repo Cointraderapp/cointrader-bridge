@@ -235,12 +235,12 @@ function trainAgentAfterTrade(netProfit, tradeMae) {
 
 function generateDynamicAiProfile() {
     let dynamicLeverage = Math.max(5, Math.floor((aiState.confidence / 100) * 50));
-    let baseCvd = 35000;
+    let baseCvd = 45000; // Erhöht auf 45.000 € für stärkere Ausbrüche
     let dynamicCvd = Math.round(baseCvd * aiState.marketAggressiveness);
     let kellyMargin = calculateKellyMargin();
 
     let adaptiveSl = Math.max(0.35, Math.min(1.10, aiState.avgWinMae * 1.25));
-    let adaptiveMinRange = parseFloat(Math.max(0.18, 0.12 * aiState.marketAggressiveness).toFixed(2));
+    let adaptiveMinRange = parseFloat(Math.max(0.22, 0.15 * aiState.marketAggressiveness).toFixed(2));
 
     return {
         id: 'AUTO_KI',
@@ -249,10 +249,10 @@ function generateDynamicAiProfile() {
         minRangePct: adaptiveMinRange,
         leverage: dynamicLeverage,
         margin: kellyMargin,
-        tp: parseFloat((0.50 + (aiState.confidence / 100) * 0.30).toFixed(2)),
+        tp: parseFloat((0.60 + (aiState.confidence / 100) * 0.30).toFixed(2)),
         sl: parseFloat(adaptiveSl.toFixed(2)),
-        timeoutSec: 90,
-        cooldownSec: Math.round(10 * aiState.marketAggressiveness),
+        timeoutSec: 75,
+        cooldownSec: Math.round(15 * aiState.marketAggressiveness),
         use5MinTrend: true,
         isDynamic: true
     };
@@ -549,10 +549,11 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
         const currentCvd = cvdEuro[symbol] || 0;
 
-        if (pos.peakProfitPct >= 0.40 && !pos.breakEvenTriggered) {
+        // ERHÖHTER BREAK-EVEN (Mindestens +0.50% Kursplus für Absicherung)
+        if (pos.peakProfitPct >= 0.50 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
-            pos.dynamicSLPct = -0.20;
-            broadcastLog(`🛡️ <span class="text-indigo-400 font-bold">BREAK-EVEN:</span> SL auf +0.20% gesichert.`);
+            pos.dynamicSLPct = -0.28; // Sicheres Nettoplus nach Gebühren
+            broadcastLog(`🛡️ <span class="text-indigo-400 font-bold">BREAK-EVEN:</span> SL auf +0.28% gesichert.`);
             saveGlobalState();
             broadcastState();
         }
@@ -586,7 +587,11 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
 
         let timeoutTriggered = false;
-        if (timeInTradeSec >= currentProfile.timeoutSec) {
+
+        // SCHNELLERER LOSS-CUT: Nach 35 Sek. im Minus (< -0.15%) sofort Reißleine ziehen!
+        if (priceChangePct < -0.15 && timeInTradeSec >= 35) {
+            timeoutTriggered = true;
+        } else if (timeInTradeSec >= currentProfile.timeoutSec) {
             if (isActivelyRebounding || (isSellingDriedUp && isTrendStillValid)) {
                 if (timeInTradeSec >= 360) {
                     timeoutTriggered = true;
@@ -641,16 +646,13 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 trainAgentAfterTrade(netProfit, pos.mae);
             }
 
-            // ANTI-OVERTRADING FIX: Symbol-spezifische Cooldown-Sperre (3 bis 5 Minuten)
             const cooldownTimeMs = isWin ? 30000 : (consecutiveLosses >= 2 ? 300000 : 180000);
             symbolCooldown[symbol] = now + cooldownTimeMs;
             tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000);
 
-            // CVD FÜR DIESEN COIN NULLEN
             cvdEuro[symbol] = 0;
 
-            // FIX: EXPLIZITER COIN-NAME VOLLSTÄNDIG AN ERSTER STELLE
-            let exitDetail = pos.breakEvenTriggered ? '🛡️ Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Momentum-Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
+            let exitDetail = pos.breakEvenTriggered ? '🛡️ Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Fast-Cut / Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
             const noteText = `${symbol} ${pos.type} | ${exitDetail} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`;
 
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
@@ -665,7 +667,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             };
             globalState.transactions.push(newTx);
             
-            broadcastLog(`🤖 <span class="${statusColor} font-bold">${isWin ? '🎯 TAKE-PROFIT' : '🛑 STOP-LOSS / TIMEOUT'} (${symbol}):</span> Closed @ ${price.toFixed(4)} € | Netto: <span class="${statusColor}">${isWin ? '+' : ''}${netProfit.toFixed(2)} €</span>`);
+            broadcastLog(`🤖 <span class="${statusColor} font-bold">${isWin ? '🎯 TAKE-PROFIT' : '🛑 FAST-CUT / TIMEOUT'} (${symbol}):</span> Closed @ ${price.toFixed(4)} € | Netto: <span class="${statusColor}">${isWin ? '+' : ''}${netProfit.toFixed(2)} €</span>`);
             saveGlobalState();
             broadcastState();
         }
@@ -674,7 +676,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         
         if (globalState.dailyHardLockActive) return;
 
-        // PRÜFEN OB COIN IM SYMBOL-COOLDOWN IST
         if (symbolCooldown[symbol] && now < symbolCooldown[symbol]) return;
 
         const sessionInfo = getSessionMultiplier();
