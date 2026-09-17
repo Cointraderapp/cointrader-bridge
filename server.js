@@ -704,14 +704,33 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         
         const isTrendAligned = check5MinTrend(sym, price, posType, currentProfile);
 
+        // 1. VWAP-ÜBERDEHNUNG VERSCHÄRFEN (Max. 0,25% Abstand vom fairen Preis)
         const currentVWAP = getVWAP(sym, price, euroVolume);
         const vwapDiffPct = ((price - currentVWAP) / currentVWAP) * 100;
-        const isOverextendedLong = posType === 'LONG' && vwapDiffPct > 0.80;
-        const isOverextendedShort = posType === 'SHORT' && vwapDiffPct < -0.80;
+        const isOverextendedLong = posType === 'LONG' && vwapDiffPct > 0.25;
+        const isOverextendedShort = posType === 'SHORT' && vwapDiffPct < -0.25;
+
+        // 2. EMA-20 KERZEN-SCHUTZ (Verhindert Einstieg am lokalen Höchstpunkt / Top-Spike)
+        const history = priceHistory[sym] || [];
+        let isEmaOverextended = false;
+        if (history.length >= 20) {
+            const ema20 = history.slice(-20).reduce((a, b) => a + b, 0) / 20;
+            const emaDiffPct = ((price - ema20) / ema20) * 100;
+            
+            if (posType === 'LONG' && emaDiffPct > 0.20) isEmaOverextended = true;
+            if (posType === 'SHORT' && emaDiffPct < -0.20) isEmaOverextended = true;
+        }
 
         const isTelemetryPermitted = evaluateStrictTelemetryGates(sym, posType);
 
-        if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort) && isTrendAligned && !isOverextendedLong && !isOverextendedShort && isTelemetryPermitted) {
+        if (Math.abs(currentCvd) >= requiredEuroCvd && 
+            (isValidLong || isValidShort) && 
+            isTrendAligned && 
+            !isOverextendedLong && 
+            !isOverextendedShort && 
+            !isEmaOverextended && 
+            isTelemetryPermitted) {
+
             globalState.inPosition = true;
             globalState.position = {
                 symbol: sym,
