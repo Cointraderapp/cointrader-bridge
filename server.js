@@ -235,7 +235,7 @@ function trainAgentAfterTrade(netProfit, tradeMae) {
 
 function generateDynamicAiProfile() {
     let dynamicLeverage = Math.max(5, Math.floor((aiState.confidence / 100) * 50));
-    let baseCvd = 45000; // Erhöht auf 45.000 € für stärkere Ausbrüche
+    let baseCvd = 45000;
     let dynamicCvd = Math.round(baseCvd * aiState.marketAggressiveness);
     let kellyMargin = calculateKellyMargin();
 
@@ -498,19 +498,22 @@ function broadcastLog(message) {
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     if (price <= 0 || isNaN(price)) return; 
     
-    if (priceHistory[symbol] && priceHistory[symbol].length > 0) {
-        const lastValidPrice = priceHistory[symbol][priceHistory[symbol].length - 1];
+    // CASE-SENSITIVITY FIX: Symbol durchgehend großschreiben
+    const sym = symbol.toUpperCase();
+
+    if (priceHistory[sym] && priceHistory[sym].length > 0) {
+        const lastValidPrice = priceHistory[sym][priceHistory[sym].length - 1];
         const jumpPct = Math.abs((price - lastValidPrice) / lastValidPrice) * 100;
         if (jumpPct > 10) return; 
     }
 
-    prices[symbol] = price;
-    cvdEuro[symbol] = Math.round(((cvdEuro[symbol] || 0) + euroVolumeDelta) * 0.985);
+    prices[sym] = price;
+    cvdEuro[sym] = Math.round(((cvdEuro[sym] || 0) + euroVolumeDelta) * 0.985);
     const now = Date.now();
 
-    if (!priceHistory[symbol]) priceHistory[symbol] = [];
-    priceHistory[symbol].push(price);
-    if (priceHistory[symbol].length > 180) priceHistory[symbol].shift();
+    if (!priceHistory[sym]) priceHistory[sym] = [];
+    priceHistory[sym].push(price);
+    if (priceHistory[sym].length > 180) priceHistory[sym].shift();
 
     if (!globalState.agentActive) return;
 
@@ -520,9 +523,9 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     let isBreakoutLong = false;
     let isBreakoutShort = false;
 
-    if (priceHistory[symbol].length >= 20) {
-        const maxP = Math.max(...priceHistory[symbol].slice(-60));
-        const minP = Math.min(...priceHistory[symbol].slice(-60));
+    if (priceHistory[sym].length >= 20) {
+        const maxP = Math.max(...priceHistory[sym].slice(-60));
+        const minP = Math.min(...priceHistory[sym].slice(-60));
         const rangePct = ((maxP - minP) / price) * 100;
         
         if (rangePct >= currentProfile.minRangePct) {
@@ -534,7 +537,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
     if (globalState.inPosition && globalState.position) {
         const pos = globalState.position;
-        if (symbol !== pos.symbol) return;
+        if (sym !== pos.symbol) return;
 
         let priceChangePct = ((price - pos.buyPrice) / pos.buyPrice) * 100;
         if (pos.type === 'SHORT') priceChangePct = -priceChangePct;
@@ -547,13 +550,13 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             pos.mae = priceChangePct;
         }
 
-        const currentCvd = cvdEuro[symbol] || 0;
+        const currentCvd = cvdEuro[sym] || 0;
 
-        // ERHÖHTER BREAK-EVEN (Mindestens +0.50% Kursplus für Absicherung)
+        // GEBÜHRENSICHERER BREAK-EVEN (Trigger ab +0.50% Plus, Absicherung auf -0.28% SL = +0.16% Netto nach Gebühren)
         if (pos.peakProfitPct >= 0.50 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
-            pos.dynamicSLPct = -0.28; // Sicheres Nettoplus nach Gebühren
-            broadcastLog(`🛡️ <span class="text-indigo-400 font-bold">BREAK-EVEN:</span> SL auf +0.28% gesichert.`);
+            pos.dynamicSLPct = -0.28; 
+            broadcastLog(`🛡️ <span class="text-indigo-400 font-bold">NETTO BREAK-EVEN:</span> SL auf +0.28% gesichert.`);
             saveGlobalState();
             broadcastState();
         }
@@ -577,12 +580,12 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             }
         }
 
-        const history = priceHistory[symbol] || [];
+        const history = priceHistory[sym] || [];
         const lastPrice = history.length >= 2 ? history[history.length - 2] : price;
         const isActivelyRebounding = (pos.type === 'LONG' && price > lastPrice) || (pos.type === 'SHORT' && price < lastPrice);
 
         const isSellingDriedUp = Math.abs(euroVolumeDelta) < 1500; 
-        const isTrendStillValid = check5MinTrend(symbol, price, pos.type, currentProfile);
+        const isTrendStillValid = check5MinTrend(sym, price, pos.type, currentProfile);
 
         const timeInTradeSec = Math.floor((now - pos.buyTime) / 1000);
 
@@ -646,14 +649,17 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 trainAgentAfterTrade(netProfit, pos.mae);
             }
 
+            // ANTI-OVERTRADING FIX: Symbol-spezifische Cooldown-Sperre (3 bis 5 Minuten)
             const cooldownTimeMs = isWin ? 30000 : (consecutiveLosses >= 2 ? 300000 : 180000);
-            symbolCooldown[symbol] = now + cooldownTimeMs;
+            symbolCooldown[sym] = now + cooldownTimeMs;
             tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000);
 
-            cvdEuro[symbol] = 0;
+            // CVD FÜR DIESEN COIN NULLEN
+            cvdEuro[sym] = 0;
 
+            // FIX: EXPLIZITER COIN-NAME VOLLSTÄNDIG AN ERSTER STELLE
             let exitDetail = pos.breakEvenTriggered ? '🛡️ Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Fast-Cut / Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
-            const noteText = `${symbol} ${pos.type} | ${exitDetail} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`;
+            const noteText = `${sym} ${pos.type} | ${exitDetail} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`;
 
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
 
@@ -667,7 +673,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             };
             globalState.transactions.push(newTx);
             
-            broadcastLog(`🤖 <span class="${statusColor} font-bold">${isWin ? '🎯 TAKE-PROFIT' : '🛑 FAST-CUT / TIMEOUT'} (${symbol}):</span> Closed @ ${price.toFixed(4)} € | Netto: <span class="${statusColor}">${isWin ? '+' : ''}${netProfit.toFixed(2)} €</span>`);
+            broadcastLog(`🤖 <span class="${statusColor} font-bold">${isWin ? '🎯 TAKE-PROFIT' : '🛑 FAST-CUT / TIMEOUT'} (${sym}):</span> Closed @ ${price.toFixed(4)} € | Netto: <span class="${statusColor}">${isWin ? '+' : ''}${netProfit.toFixed(2)} €</span>`);
             saveGlobalState();
             broadcastState();
         }
@@ -676,14 +682,14 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         
         if (globalState.dailyHardLockActive) return;
 
-        if (symbolCooldown[symbol] && now < symbolCooldown[symbol]) return;
+        if (symbolCooldown[sym] && now < symbolCooldown[sym]) return;
 
         const sessionInfo = getSessionMultiplier();
-        const currentCvd = cvdEuro[symbol] || 0;
+        const currentCvd = cvdEuro[sym] || 0;
 
         let requiredEuroCvd = currentProfile.cvdThreshold * sessionInfo.multiplier;
         
-        if (now < whaleSpikes[symbol]) {
+        if (now < whaleSpikes[sym]) {
             requiredEuroCvd *= 0.70;
         }
 
@@ -696,19 +702,19 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         const isValidLong = posType === 'LONG' && isBreakoutLong;
         const isValidShort = posType === 'SHORT' && isBreakoutShort;
         
-        const isTrendAligned = check5MinTrend(symbol, price, posType, currentProfile);
+        const isTrendAligned = check5MinTrend(sym, price, posType, currentProfile);
 
-        const currentVWAP = getVWAP(symbol, price, euroVolume);
+        const currentVWAP = getVWAP(sym, price, euroVolume);
         const vwapDiffPct = ((price - currentVWAP) / currentVWAP) * 100;
         const isOverextendedLong = posType === 'LONG' && vwapDiffPct > 0.80;
         const isOverextendedShort = posType === 'SHORT' && vwapDiffPct < -0.80;
 
-        const isTelemetryPermitted = evaluateStrictTelemetryGates(symbol, posType);
+        const isTelemetryPermitted = evaluateStrictTelemetryGates(sym, posType);
 
         if (Math.abs(currentCvd) >= requiredEuroCvd && (isValidLong || isValidShort) && isTrendAligned && !isOverextendedLong && !isOverextendedShort && isTelemetryPermitted) {
             globalState.inPosition = true;
             globalState.position = {
-                symbol: symbol,
+                symbol: sym,
                 type: posType,
                 buyPrice: price,
                 buyTime: Date.now(),
@@ -721,7 +727,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             const color = posType === 'LONG' ? 'text-emerald-400' : 'text-rose-400';
 
             const pctOfBalance = ((currentProfile.margin / globalState.balance) * 100).toFixed(1);
-            broadcastLog(`🤖 ${icon} <span class="${color} font-bold">${currentProfile.name} ORDER (${symbol} ${currentProfile.leverage}x):</span> ${posType} Einsatz ${currentProfile.margin}€ (${pctOfBalance}% des Depots) @ ${price.toFixed(4)} €`);
+            broadcastLog(`🤖 ${icon} <span class="${color} font-bold">${currentProfile.name} ORDER (${sym} ${currentProfile.leverage}x):</span> ${posType} Einsatz ${currentProfile.margin}€ (${pctOfBalance}% des Depots) @ ${price.toFixed(4)} €`);
             saveGlobalState();
             broadcastState();
         }
@@ -805,7 +811,7 @@ function connectBinanceStream() {
             const rawSymbol = tick.s;
             if (!rawSymbol) return; 
             
-            const displaySymbol = rawSymbol.endsWith('USDT') ? rawSymbol.replace('USDT', 'EUR') : rawSymbol;
+            const displaySymbol = rawSymbol.endsWith('USDT') ? rawSymbol.replace('USDT', 'EUR').toUpperCase() : rawSymbol.toUpperCase();
             
             if (tick.e === 'aggTrade') {
                 const rawPrice = parseFloat(tick.p);
