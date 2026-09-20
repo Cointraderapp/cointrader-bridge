@@ -649,8 +649,21 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 trainAgentAfterTrade(netProfit, pos.mae);
             }
 
-            // ANTI-OVERTRADING FIX: Symbol-spezifische Cooldown-Sperre (3 bis 5 Minuten)
-            const cooldownTimeMs = isWin ? 30000 : (consecutiveLosses >= 2 ? 300000 : 180000);
+            // DYNAMISCHER POST-WIN & OVERTRADING COOLDOWN
+            let cooldownTimeMs = 180000; // Standard: 3 Minuten
+
+            if (isWin) {
+                if (netProfit >= 100) {
+                    // Nach Big Wins (>=100€) benötigt der Coin 10 Minuten Konsolidierungs-Pause
+                    cooldownTimeMs = 600000; 
+                    broadcastLog(`💤 <span class="text-cyan-400 font-bold">BIG-WIN COOLDOWN (${sym}):</span> 10 Minuten Konsolidierungs-Pause nach +${netProfit.toFixed(2)} € Gewinn.`);
+                } else {
+                    cooldownTimeMs = 180000; // 3 Minuten nach normalem Gewinn
+                }
+            } else {
+                cooldownTimeMs = consecutiveLosses >= 2 ? 300000 : 180000; // 3 bis 5 Min bei Verlusten
+            }
+
             symbolCooldown[sym] = now + cooldownTimeMs;
             tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000);
 
@@ -695,6 +708,11 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
         if (consecutiveLosses >= 2) {
             requiredEuroCvd *= 1.40;
+        }
+
+        // PROGRESSIVER CVD-AUFSCHLAG BEI WIEDERHOLTEN TRADES AUF DEMSELBEN COIN
+        if (symbolCooldown[sym] && (now - symbolCooldown[sym] < 1800000)) {
+            requiredEuroCvd *= 1.30;
         }
 
         let posType = currentCvd > 0 ? 'LONG' : 'SHORT';
