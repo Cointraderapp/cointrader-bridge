@@ -303,6 +303,7 @@ function getInitialState() {
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
 const symbolCooldown = {}; 
+const symbolLossCount = {}; // TRACKING VON VERLUSTEN PRO COIN
 
 const prices = {};
 const cvdEuro = {};
@@ -310,7 +311,7 @@ const priceHistory = {};
 const whaleSpikes = {};
 const vwapData = {};
 
-let activeSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt', 'dogeusdt'];
+let activeSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt'];
 let binanceWs = null;
 
 async function fetchTopScreenerPairs() {
@@ -324,7 +325,11 @@ async function fetchTopScreenerPairs() {
             const volumeEUR = parseFloat(t.quoteVolume) * 0.92;
             const isNotLeveragedToken = !t.symbol.includes('UP') && !t.symbol.includes('DOWN');
             
-            const blacklist = ['REZ', 'LSK', 'THE', 'USD1', 'HOLO', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'EUR', 'PUMP', 'VTHO'];
+            // ERWEITERTE BLACKLIST: ERFASSUNG VON MEME-COINS MIT SCHLECHTER TICK-PRÄZISION
+            const blacklist = [
+                'PEPE', 'PENGU', 'SHIB', 'BONK', 'FLOKI', 'MUBARAK', 'WIF', 'DOGE', '1000SATS',
+                'REZ', 'LSK', 'THE', 'USD1', 'HOLO', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'EUR', 'PUMP', 'VTHO'
+            ];
             const isCleanSymbol = !/[^\x00-\x7F]/.test(t.symbol) && !blacklist.some(b => t.symbol.includes(b));
             
             return isUSDT && volumeEUR >= 5000000 && isNotLeveragedToken && isCleanSymbol;
@@ -423,6 +428,10 @@ function checkDailyReset() {
             globalState.dailyStartBalance = globalState.balance;
             globalState.dailyPnL = 0;
             globalState.dailyHardLockActive = false;
+            
+            // RESET DES SYMBOL-VERLUSTCOUNTERS UM 00:00 UTC
+            Object.keys(symbolLossCount).forEach(k => delete symbolLossCount[k]);
+
             broadcastLog(`🌅 <span class="text-cyan-400 font-bold">TAGES-RESET (00:00 UTC):</span> Daily Limit erneuert. Startkapital: ${globalState.balance.toFixed(2)} €`);
             saveGlobalState();
             broadcastState();
@@ -498,7 +507,6 @@ function broadcastLog(message) {
 function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
     if (price <= 0 || isNaN(price)) return; 
     
-    // CASE-SENSITIVITY FIX: Symbol durchgehend großschreiben
     const sym = symbol.toUpperCase();
 
     if (priceHistory[sym] && priceHistory[sym].length > 0) {
@@ -552,7 +560,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
         const currentCvd = cvdEuro[sym] || 0;
 
-        // GEBÜHRENSICHERER BREAK-EVEN (Trigger ab +0.50% Plus, Absicherung auf -0.28% SL = +0.16% Netto nach Gebühren)
         if (pos.peakProfitPct >= 0.50 && !pos.breakEvenTriggered) {
             pos.breakEvenTriggered = true;
             pos.dynamicSLPct = -0.28; 
@@ -591,7 +598,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
         let timeoutTriggered = false;
 
-        // SCHNELLERER LOSS-CUT: Nach 35 Sek. im Minus (< -0.15%) sofort Reißleine ziehen!
         if (priceChangePct < -0.15 && timeInTradeSec >= 35) {
             timeoutTriggered = true;
         } else if (timeInTradeSec >= currentProfile.timeoutSec) {
@@ -638,8 +644,11 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             if (isWin) {
                 globalState.winCount++;
                 consecutiveLosses = 0;
+                symbolLossCount[sym] = 0; // Verlust-Zähler bei Gewinn löschen
             } else {
                 consecutiveLosses++;
+                symbolLossCount[sym] = (symbolLossCount[sym] || 0) + 1;
+                
                 if (consecutiveLosses >= 2) {
                     broadcastLog(`⚠️ <span class="text-amber-400 font-bold">ANTI-WHIPSAW:</span> ${consecutiveLosses} Verluste in Folge.`);
                 }
@@ -649,28 +658,28 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 trainAgentAfterTrade(netProfit, pos.mae);
             }
 
-            // DYNAMISCHER POST-WIN & OVERTRADING COOLDOWN
-            let cooldownTimeMs = 180000; // Standard: 3 Minuten
+            // NEU: HARD-BAN NACH 3 VERLUSTEN PRO COIN (12 STUNDEN GESPERRT)
+            let cooldownTimeMs = 180000;
 
-            if (isWin) {
+            if (symbolLossCount[sym] >= 3) {
+                cooldownTimeMs = 43200000; // 12 Stunden Sperre für diesen Coin
+                broadcastLog(`🛑 <span class="text-rose-500 font-bold">SYMBOL HARD-BAN (${sym}):</span> 3 Verluste in Folge. Coin für 12 Stunden gesperrt!`);
+            } else if (isWin) {
                 if (netProfit >= 100) {
-                    // Nach Big Wins (>=100€) benötigt der Coin 10 Minuten Konsolidierungs-Pause
-                    cooldownTimeMs = 600000; 
-                    broadcastLog(`💤 <span class="text-cyan-400 font-bold">BIG-WIN COOLDOWN (${sym}):</span> 10 Minuten Konsolidierungs-Pause nach +${netProfit.toFixed(2)} € Gewinn.`);
+                    cooldownTimeMs = 600000; // 10 Min nach Big Win
+                    broadcastLog(`💤 <span class="text-cyan-400 font-bold">BIG-WIN COOLDOWN (${sym}):</span> 10 Minuten Pause nach +${netProfit.toFixed(2)} € Gewinn.`);
                 } else {
-                    cooldownTimeMs = 180000; // 3 Minuten nach normalem Gewinn
+                    cooldownTimeMs = 180000; 
                 }
             } else {
-                cooldownTimeMs = consecutiveLosses >= 2 ? 300000 : 180000; // 3 bis 5 Min bei Verlusten
+                cooldownTimeMs = consecutiveLosses >= 2 ? 300000 : 180000; 
             }
 
             symbolCooldown[sym] = now + cooldownTimeMs;
             tradeCooldownUntil = now + (currentProfile.cooldownSec * 1000);
 
-            // CVD FÜR DIESEN COIN NULLEN
             cvdEuro[sym] = 0;
 
-            // FIX: EXPLIZITER COIN-NAME VOLLSTÄNDIG AN ERSTER STELLE
             let exitDetail = pos.breakEvenTriggered ? '🛡️ Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Fast-Cut / Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
             const noteText = `${sym} ${pos.type} | ${exitDetail} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`;
 
@@ -710,7 +719,6 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             requiredEuroCvd *= 1.40;
         }
 
-        // PROGRESSIVER CVD-AUFSCHLAG BEI WIEDERHOLTEN TRADES AUF DEMSELBEN COIN
         if (symbolCooldown[sym] && (now - symbolCooldown[sym] < 1800000)) {
             requiredEuroCvd *= 1.30;
         }
@@ -722,13 +730,11 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
         
         const isTrendAligned = check5MinTrend(sym, price, posType, currentProfile);
 
-        // 1. VWAP-ÜBERDEHNUNG VERSCHÄRFEN (Max. 0,25% Abstand vom fairen Preis)
         const currentVWAP = getVWAP(sym, price, euroVolume);
         const vwapDiffPct = ((price - currentVWAP) / currentVWAP) * 100;
         const isOverextendedLong = posType === 'LONG' && vwapDiffPct > 0.25;
         const isOverextendedShort = posType === 'SHORT' && vwapDiffPct < -0.25;
 
-        // 2. EMA-20 KERZEN-SCHUTZ (Verhindert Einstieg am lokalen Höchstpunkt / Top-Spike)
         const history = priceHistory[sym] || [];
         let isEmaOverextended = false;
         if (history.length >= 20) {
