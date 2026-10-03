@@ -59,9 +59,9 @@ const clients = new Set();
 // 1. STRATEGIE-PROFILE
 const PROFILES = {
     AUTO_KI: { id: 'AUTO_KI', name: 'Quantum-KI 🤖', isDynamic: true },
-    SAVE: { id: 'SAVE', name: 'Top5-Save 🛡️', cvdThreshold: 80000, minRangePct: 0.40, leverage: 10, margin: 2000, tp: 0.50, sl: 0.60, timeoutSec: 75, cooldownSec: 30, use5MinTrend: true },
-    MEDIUM: { id: 'MEDIUM', name: 'Top5-Medium ⚖️', cvdThreshold: 40000, minRangePct: 0.20, leverage: 20, margin: 2000, tp: 0.60, sl: 0.80, timeoutSec: 90, cooldownSec: 20, use5MinTrend: true },
-    RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 15000, minRangePct: 0.10, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10, use5MinTrend: false }
+    SAVE: { id: 'SAVE', name: 'Top5-Save 🛡️', cvdThreshold: 85000, minRangePct: 0.45, leverage: 10, margin: 2000, tp: 0.50, sl: 0.60, timeoutSec: 75, cooldownSec: 30, use5MinTrend: true },
+    MEDIUM: { id: 'MEDIUM', name: 'Top5-Medium ⚖️', cvdThreshold: 65000, minRangePct: 0.35, leverage: 20, margin: 2000, tp: 0.60, sl: 0.80, timeoutSec: 90, cooldownSec: 20, use5MinTrend: true },
+    RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 30000, minRangePct: 0.20, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10, use5MinTrend: false }
 };
 
 // 2. LIVE TELEMETRIE, SQUEEZE & MAKRO MATRIX STATE
@@ -235,12 +235,12 @@ function trainAgentAfterTrade(netProfit, tradeMae) {
 
 function generateDynamicAiProfile() {
     let dynamicLeverage = Math.max(5, Math.floor((aiState.confidence / 100) * 50));
-    let baseCvd = 45000;
+    let baseCvd = 65000; // ERHÖHT AUF 65.000 € (NUR NOCH STARKE BILDUNGEN VON VOLUMEN FILTERN)
     let dynamicCvd = Math.round(baseCvd * aiState.marketAggressiveness);
     let kellyMargin = calculateKellyMargin();
 
     let adaptiveSl = Math.max(0.35, Math.min(1.10, aiState.avgWinMae * 1.25));
-    let adaptiveMinRange = parseFloat(Math.max(0.22, 0.15 * aiState.marketAggressiveness).toFixed(2));
+    let adaptiveMinRange = parseFloat(Math.max(0.35, 0.20 * aiState.marketAggressiveness).toFixed(2)); // ERHÖHT AUF 0.35% FOR STRIKTERES MIN-RANGE-GATE
 
     return {
         id: 'AUTO_KI',
@@ -303,7 +303,7 @@ function getInitialState() {
 let tradeCooldownUntil = 0;
 let consecutiveLosses = 0;
 const symbolCooldown = {}; 
-const symbolLossCount = {}; // TRACKING VON VERLUSTEN PRO COIN
+const symbolLossCount = {}; 
 
 const prices = {};
 const cvdEuro = {};
@@ -311,28 +311,24 @@ const priceHistory = {};
 const whaleSpikes = {};
 const vwapData = {};
 
-let activeSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'xrpusdt'];
+let activeSymbols = ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt', 'xrpusdt'];
 let binanceWs = null;
 
+// HARD-BLUECHIP SCREENER: NUR NOCH DEEP-LIQUIDITY MÄRKTE ZULASSEN
 async function fetchTopScreenerPairs() {
     try {
         const response = await fetch('https://api.binance.com/api/v3/ticker/24hr');
         if (!response.ok) throw new Error(`HTTP Status ${response.status}`);
         const tickers = await response.json();
 
+        const allowedBluechips = ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt', 'xrpusdt'];
+
         const filtered = tickers.filter(t => {
+            const symLower = t.symbol.toLowerCase();
             const isUSDT = t.symbol.endsWith('USDT');
-            const volumeEUR = parseFloat(t.quoteVolume) * 0.92;
             const isNotLeveragedToken = !t.symbol.includes('UP') && !t.symbol.includes('DOWN');
             
-            // ERWEITERTE BLACKLIST: ERFASSUNG VON MEME-COINS MIT SCHLECHTER TICK-PRÄZISION
-            const blacklist = [
-                'PEPE', 'PENGU', 'SHIB', 'BONK', 'FLOKI', 'MUBARAK', 'WIF', 'DOGE', '1000SATS',
-                'REZ', 'LSK', 'THE', 'USD1', 'HOLO', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'EUR', 'PUMP', 'VTHO'
-            ];
-            const isCleanSymbol = !/[^\x00-\x7F]/.test(t.symbol) && !blacklist.some(b => t.symbol.includes(b));
-            
-            return isUSDT && volumeEUR >= 5000000 && isNotLeveragedToken && isCleanSymbol;
+            return isUSDT && isNotLeveragedToken && allowedBluechips.includes(symLower);
         });
 
         filtered.sort((a, b) => {
@@ -341,15 +337,12 @@ async function fetchTopScreenerPairs() {
             return volaB - volaA; 
         });
 
-        let topSymbols = filtered.slice(0, 15).map(t => t.symbol.toLowerCase());
+        let topSymbols = filtered.map(t => t.symbol.toLowerCase());
         
-        if (!topSymbols.includes('btcusdt')) topSymbols.unshift('btcusdt');
-        if (!topSymbols.includes('ethusdt')) topSymbols.unshift('ethusdt');
-
-        return topSymbols.length >= 5 ? topSymbols : activeSymbols;
+        return topSymbols.length > 0 ? topSymbols : ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt', 'xrpusdt'];
     } catch (err) {
         console.error('⚠️ [Screener] Fehler beim Abrufen der Binance-Ticker:', err.message);
-        return activeSymbols;
+        return ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt', 'xrpusdt'];
     }
 }
 
@@ -359,7 +352,7 @@ async function syncDynamicStream() {
 
     if (hasChanged || !binanceWs || binanceWs.readyState !== WebSocket.OPEN) {
         activeSymbols = newSymbols;
-        broadcastLog(`🔍 <span class="text-cyan-400 font-bold">HOT-COIN SCREENER:</span> Top 15 Märkte aktualisiert (${activeSymbols.map(s => s.toUpperCase()).slice(0, 5).join(', ')}...)`);
+        broadcastLog(`🔍 <span class="text-cyan-400 font-bold">BLUECHIP SCREENER:</span> Fokus auf Kernmärkte (${activeSymbols.map(s => s.toUpperCase()).join(', ')})`);
         connectBinanceStream();
     }
 }
@@ -429,7 +422,6 @@ function checkDailyReset() {
             globalState.dailyPnL = 0;
             globalState.dailyHardLockActive = false;
             
-            // RESET DES SYMBOL-VERLUSTCOUNTERS UM 00:00 UTC
             Object.keys(symbolLossCount).forEach(k => delete symbolLossCount[k]);
 
             broadcastLog(`🌅 <span class="text-cyan-400 font-bold">TAGES-RESET (00:00 UTC):</span> Daily Limit erneuert. Startkapital: ${globalState.balance.toFixed(2)} €`);
@@ -644,7 +636,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
             if (isWin) {
                 globalState.winCount++;
                 consecutiveLosses = 0;
-                symbolLossCount[sym] = 0; // Verlust-Zähler bei Gewinn löschen
+                symbolLossCount[sym] = 0; 
             } else {
                 consecutiveLosses++;
                 symbolLossCount[sym] = (symbolLossCount[sym] || 0) + 1;
@@ -658,15 +650,14 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
                 trainAgentAfterTrade(netProfit, pos.mae);
             }
 
-            // NEU: HARD-BAN NACH 3 VERLUSTEN PRO COIN (12 STUNDEN GESPERRT)
             let cooldownTimeMs = 180000;
 
             if (symbolLossCount[sym] >= 3) {
-                cooldownTimeMs = 43200000; // 12 Stunden Sperre für diesen Coin
+                cooldownTimeMs = 43200000; 
                 broadcastLog(`🛑 <span class="text-rose-500 font-bold">SYMBOL HARD-BAN (${sym}):</span> 3 Verluste in Folge. Coin für 12 Stunden gesperrt!`);
             } else if (isWin) {
                 if (netProfit >= 100) {
-                    cooldownTimeMs = 600000; // 10 Min nach Big Win
+                    cooldownTimeMs = 600000; 
                     broadcastLog(`💤 <span class="text-cyan-400 font-bold">BIG-WIN COOLDOWN (${sym}):</span> 10 Minuten Pause nach +${netProfit.toFixed(2)} € Gewinn.`);
                 } else {
                     cooldownTimeMs = 180000; 
@@ -680,7 +671,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
             cvdEuro[sym] = 0;
 
-            let exitDetail = pos.breakEvenTriggered ? '🛡️ Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Fast-Cut / Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
+            let exitDetail = pos.breakEvenTriggered ? '🛡️️ Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Fast-Cut / Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
             const noteText = `${sym} ${pos.type} | ${exitDetail} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`;
 
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
