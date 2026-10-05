@@ -41,7 +41,7 @@ app.post('/api/pretrain', async (req, res) => {
     broadcastState();
     
     const winRatePct = ((winCount / trades.length) * 100).toFixed(1);
-    broadcastLog(`🎓 <span class="text-indigo-400 font-bold">PRE-TRAINING ABGESCHLOSSEN:</span> ${trades.length} Trades verarbeitet (${winCount} Wins / ${lossCount} Losses | Win-Rate: ${winRatePct}%). Neue Confidence: ${aiState.confidence}% | MAE-Avg: ${aiState.avgWinMae}%`);
+    broadcastLog(`🎓 <span class="text-indigo-400 font-bold">PRE-TRAINING ABGESCHLISTEN:</span> ${trades.length} Trades verarbeitet (${winCount} Wins / ${lossCount} Losses | Win-Rate: ${winRatePct}%). Neue Confidence: ${aiState.confidence}% | MAE-Avg: ${aiState.avgWinMae}%`);
     
     res.json({ 
         success: true, 
@@ -59,9 +59,9 @@ const clients = new Set();
 // 1. STRATEGIE-PROFILE
 const PROFILES = {
     AUTO_KI: { id: 'AUTO_KI', name: 'Quantum-KI 🤖', isDynamic: true },
-    SAVE: { id: 'SAVE', name: 'Top5-Save 🛡️', cvdThreshold: 85000, minRangePct: 0.45, leverage: 10, margin: 2000, tp: 0.50, sl: 0.60, timeoutSec: 75, cooldownSec: 30, use5MinTrend: true },
-    MEDIUM: { id: 'MEDIUM', name: 'Top5-Medium ⚖️', cvdThreshold: 65000, minRangePct: 0.35, leverage: 20, margin: 2000, tp: 0.60, sl: 0.80, timeoutSec: 90, cooldownSec: 20, use5MinTrend: true },
-    RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 30000, minRangePct: 0.20, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10, use5MinTrend: false }
+    SAVE: { id: 'SAVE', name: 'Top5-Save 🛡️', cvdThreshold: 60000, minRangePct: 0.25, leverage: 10, margin: 2000, tp: 0.50, sl: 0.60, timeoutSec: 75, cooldownSec: 30, use5MinTrend: true },
+    MEDIUM: { id: 'MEDIUM', name: 'Top5-Medium ⚖️', cvdThreshold: 40000, minRangePct: 0.18, leverage: 20, margin: 2000, tp: 0.60, sl: 0.80, timeoutSec: 90, cooldownSec: 20, use5MinTrend: true },
+    RISK: { id: 'RISK', name: 'Top5-Risk ⚡', cvdThreshold: 20000, minRangePct: 0.12, leverage: 50, margin: 2000, tp: 0.30, sl: 0.40, timeoutSec: 45, cooldownSec: 10, use5MinTrend: false }
 };
 
 // 2. LIVE TELEMETRIE, SQUEEZE & MAKRO MATRIX STATE
@@ -134,7 +134,7 @@ async function loadAiMemory() {
             console.log(`🧠 [KI-Gedächtnis] Aus MongoDB geladen. Conf: ${aiState.confidence}%, MAE-Avg: ${aiState.avgWinMae}%`);
         }
     } catch (e) {
-        console.error('⚠️ [KI-Gedächtnis] Fehler beim DB-Laden:', e.message);
+        console.error('⚠️️ [KI-Gedächtnis] Fehler beim DB-Laden:', e.message);
     }
 }
 
@@ -149,7 +149,7 @@ async function saveAiMemory() {
             console.log('💾 [KI-Gedächtnis] Erfolgreich in MongoDB gesichert.');
         }
     } catch (e) {
-        console.error('⚠️ [KI-Gedächtnis] Fehler beim DB-Speichern:', e.message);
+        console.error('⚠️️ [KI-Gedächtnis] Fehler beim DB-Speichern:', e.message);
     }
 }
 
@@ -233,14 +233,20 @@ function trainAgentAfterTrade(netProfit, tradeMae) {
     saveAiMemory();
 }
 
+// ----------------------------------------------------------------
+// FEINJUSTIERT FÜR BLUECHIPS (BTC / ETH / SOL / BNB / XRP)
+// ----------------------------------------------------------------
 function generateDynamicAiProfile() {
     let dynamicLeverage = Math.max(5, Math.floor((aiState.confidence / 100) * 50));
-    let baseCvd = 65000; // ERHÖHT AUF 65.000 € (NUR NOCH STARKE BILDUNGEN VON VOLUMEN FILTERN)
+    
+    // CVD-Schwelle realistisch für hochliquide Bluechips ansetzen
+    let baseCvd = 40000; 
     let dynamicCvd = Math.round(baseCvd * aiState.marketAggressiveness);
     let kellyMargin = calculateKellyMargin();
 
     let adaptiveSl = Math.max(0.35, Math.min(1.10, aiState.avgWinMae * 1.25));
-    let adaptiveMinRange = parseFloat(Math.max(0.35, 0.20 * aiState.marketAggressiveness).toFixed(2)); // ERHÖHT AUF 0.35% FOR STRIKTERES MIN-RANGE-GATE
+    // Min-Range an geringere Prozent-Spreads von Bitcoin/Ethereum anpassen
+    let adaptiveMinRange = parseFloat(Math.max(0.18, 0.12 * aiState.marketAggressiveness).toFixed(2));
 
     return {
         id: 'AUTO_KI',
@@ -671,7 +677,7 @@ function processCloudTradingEngine(symbol, price, euroVolumeDelta, euroVolume) {
 
             cvdEuro[sym] = 0;
 
-            let exitDetail = pos.breakEvenTriggered ? '🛡️️ Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Fast-Cut / Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
+            let exitDetail = pos.breakEvenTriggered ? '🛡 Trailing/Break-Even Ausstieg' : (timeoutTriggered ? `⏱️ Fast-Cut / Timeout (${timeInTradeSec}s)` : `🤖 ${currentProfile.name}`);
             const noteText = `${sym} ${pos.type} | ${exitDetail} (${isWin ? '+' : ''}${netProfit.toFixed(2)} € Netto | MAE: ${(pos.mae||0).toFixed(2)}%)`;
 
             const statusColor = isWin ? 'text-emerald-400' : 'text-rose-400';
